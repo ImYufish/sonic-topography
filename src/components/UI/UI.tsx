@@ -948,21 +948,30 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     currentSongIdRef.current = currentSongId;
   }, [currentSongId]);
 
-  // 仅在「打开歌单面板 / 切换歌单 / 切换右侧列表视图」时，把当前正在播放的歌滚动到可视区域；
+  // 仅在「打开歌单面板 / 切换歌单 / 切换右侧列表视图」时，把当前正在播放的歌滚动到可视区域中央；
   // 切歌（currentSongId 变化）不再触发，避免浏览列表时被反复跳动打断。
-  // block: nearest 仅在不临界时移动，不打扰浏览。
+  // 用 requestAnimationFrame 轮询若干帧：歌单歌曲可能是异步渲染的，首帧面板刚挂载、歌曲还没进 DOM，
+  // 直接 querySelector 会拿到 null 而放弃；多等几帧确保元素出现再滚。
   useEffect(() => {
     const id = String(currentSongIdRef.current);
-    if (!id) return;
+    if (!id || id === 'null') return;
     const sel = `[data-song-id="${CSS.escape(id)}"]`;
-    if (showPlaylistPanel && playlistPanelScrollRef.current) {
-      const el = playlistPanelScrollRef.current.querySelector(sel);
-      if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }
-    if (rightTracksScrollRef.current) {
-      const el = rightTracksScrollRef.current.querySelector(sel);
-      if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }
+    let raf = 0;
+    let tries = 0;
+    const attempt = () => {
+      const containers = [playlistPanelScrollRef.current, rightTracksScrollRef.current];
+      for (const c of containers) {
+        const el = c?.querySelector<HTMLElement>(sel);
+        if (el) {
+          el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          return;
+        }
+      }
+      // 还没渲染出来，再等几帧（最多约 300ms）
+      if (tries++ < 18) raf = requestAnimationFrame(attempt);
+    };
+    raf = requestAnimationFrame(attempt);
+    return () => cancelAnimationFrame(raf);
   }, [showPlaylistPanel, activePlaylistId, activeRightSidebarSelection, mobileRightView, isMobile]);
 
   const addSongToPlaylist = (playlistId: string, song: NeteaseSong) => {
