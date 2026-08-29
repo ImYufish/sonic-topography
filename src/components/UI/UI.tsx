@@ -483,6 +483,9 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
   // 歌单歌曲列表的滚动容器：用于「打开歌单自动聚焦到当前播放的歌」
   const playlistPanelScrollRef = useRef<HTMLDivElement | null>(null);
   const rightTracksScrollRef = useRef<HTMLDivElement | null>(null);
+  // 始终保存最新的 currentSongId，供下方「打开菜单时滚动到当前歌曲」读取；
+  // 不把它放进滚动 effect 的依赖，避免切歌时也触发滚动。
+  const currentSongIdRef = useRef<number | string | null>(null);
   const hasBothCloudLogins = isNeteaseCookieValid && isQQCookieValid;
   const effectiveSearchProvider: SearchProvider = searchProvider;
   const activeCloudLabel = cloudProvider === 'qq' ? t('ui.text.1', lang) : t('ui.text.2', lang);
@@ -940,10 +943,17 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     return () => engine.audioElement.removeEventListener('ended', handleEnded);
   }, [playQueue, currentSongId, playMode, activePlaylistId, playlists]);
 
-  // 打开歌单 / 切换歌单时，自动把当前正在播放的歌滚动到可视区域（block: nearest 仅在不临界时移动，不打扰浏览）
+  // 用 ref 始终保存最新的 currentSongId，供下方滚动逻辑读取（不放进依赖，避免切歌触发滚动）。
   useEffect(() => {
-    if (!currentSongId) return;
-    const id = String(currentSongId);
+    currentSongIdRef.current = currentSongId;
+  }, [currentSongId]);
+
+  // 仅在「打开歌单面板 / 切换歌单 / 切换右侧列表视图」时，把当前正在播放的歌滚动到可视区域；
+  // 切歌（currentSongId 变化）不再触发，避免浏览列表时被反复跳动打断。
+  // block: nearest 仅在不临界时移动，不打扰浏览。
+  useEffect(() => {
+    const id = String(currentSongIdRef.current);
+    if (!id) return;
     const sel = `[data-song-id="${CSS.escape(id)}"]`;
     if (showPlaylistPanel && playlistPanelScrollRef.current) {
       const el = playlistPanelScrollRef.current.querySelector(sel);
@@ -953,7 +963,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
       const el = rightTracksScrollRef.current.querySelector(sel);
       if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
-  }, [showPlaylistPanel, activePlaylistId, activeRightSidebarSelection, mobileRightView, currentSongId, isMobile]);
+  }, [showPlaylistPanel, activePlaylistId, activeRightSidebarSelection, mobileRightView, isMobile]);
 
   const addSongToPlaylist = (playlistId: string, song: NeteaseSong) => {
     setPlaylists((current) => current.map((playlist) => {
