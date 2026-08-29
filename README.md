@@ -115,10 +115,80 @@ Cookie 是敏感登录凭据，只保存在本机。不要导出、上传或分�
 
 ## 本地数据
 
-- 主题、特效、地面 EQ、账号 Cookie 和多数设置保存在本机。
-- 开发源码运行时，本地歌单会通过 `/api/playlists` 保存到 `data/playlists.json`。
-- 打包后的桌面应用会把本地服务数据保存到 Electron 用户数据目录。
-- 上传的真实音频文件不会写入预设文件，也不会被打包进安装包。
+- 主题、特效、地面 EQ、账号 Cookie 和多数设置保存在浏览器 localStorage。
+- 本地歌单保存在浏览器 localStorage（key `sonic-topography-playlists-v1`），不依赖任何后端。
+- 上传的真实音频文件不会写入预设文件，也不会被打包。
+
+## 网页版静态部署
+
+Sonic Topography 可以构建成纯静态网页，部署到任意支持静态文件托管的平台（GitHub Pages、Cloudflare Pages/Workers、EdgeOne、Vercel、对象存储 + Nginx 等），**无需后端服务器**。
+
+### 构建
+
+```powershell
+npm install
+npm run build
+```
+
+构建产物在 `dist/`，所有资源使用相对路径（`base: './'`），可直接放到站点根目录或子目录。
+
+### 配置 Meting 接口
+
+网页版默认使用 **Meting API**（初叶 Meting 实现：`/?server=&type=&id=`，Base 路径为 `/api`，例如 `https://meting.yufish.cn/api`）来搜索、播放和获取歌词，不再依赖网易云 / QQ 的 Cookie 代理。接口地址有三种配置方式，按优先级生效：
+
+1. **运行时填写**：打开 `设置 → 账号登录 → Meting 接口`，在界面里填好地址并保存（存到浏览器 localStorage，便于临时切换）。
+2. **站点配置文件**：部署时在 `meting-config.json` 里写入 `"base": "https://你的-meting-地址/api"`。该文件随站点一起发布，是推荐的固定配置方式（仓库已内置 `https://meting.yufish.cn/api`）。
+3. **构建变量**：构建前设置环境变量 `VITE_METING_API=https://你的-meting-地址/api`。
+
+另外，也可以在页面加载脚本前注入全局变量（适合网关 / 反代统一注入）：
+
+```html
+<script>window.__SONIC_METING_API__ = 'https://你的-meting-地址';</script>
+```
+
+### 本地歌单与设置
+
+静态网页版没有后端，本地歌单、设置等全部保存在浏览器 localStorage，不会上传到服务器。`dist/`、`release/`、`.workbuddy/` 等目录均已被 `.gitignore` 忽略，请不要把账号 Cookie 或记忆文件提交进仓库。
+
+### 部署注意事项
+
+- 部署到子目录时，只要托管服务能正确返回 `dist/` 下的 `index.html` 及其相对资源即可；`meting-config.json` 需放在站点根（与 `index.html` 同级）。
+- 跨域（CORS）：你自建的 Meting API 需要在**所有响应（含 `type=url` 的 302 跳转）**上返回 `Access-Control-Allow-Origin`，否则浏览器会拦截搜索 / 歌词调用，且音频元素因 `crossOrigin="anonymous"` 无法被 Web Audio 可视化分析。
+- 该 Meting 实例的 `type=url` 对 **netease 普遍返回 404**（服务端 netease 解析异常），播放默认音源已设为 **tencent**；如需 netease 播放，请先修复服务端的 netease 解析模块（通常需要正确的 Cookie / API 令牌）。
+- 该实例**不支持 `br` 码率参数**（带 `br` 会 404），播放链接不附带码率。
+
+### EdgeOne Makers 反代（可选）
+
+如果在网页版需要使用网易云 / QQ 音乐的 `/sonic/*` 反代能力（搜索 / 播放 / 歌词 / 歌单），需要在 EdgeOne Makers 部署一个代理服务（边缘函数按项目分目录组织，详见下方结构），并在前端 `设置 → 账号登录 → API 代理` 里填写代理地址（如 `https://proxy-api.x1anyu.cn`），或构建时设置 `VITE_API_PROXY` 环境变量。
+
+EdgeOne Makers 代理按项目分目录组织，结构如下：
+
+```
+edgeone/                      # 独立 EdgeOne Makers 项目（不在本仓库内）
+  edge-functions/
+    sonic/          # Sonic Topography 代理（网易云 / QQ 音乐），路由 /sonic/*
+      [[default]].js
+    qq-lyric/       # Meting 歌词代理（@meting/core LYRIC_PROXY），路由 /lyric/*
+      [[default]].js
+```
+
+EdgeOne Makers 代理配置步骤：
+
+1. 在 EO 控制台新建一个 EdgeOne Makers 项目。
+2. 创建 `sonic/[[default]].js` 边缘函数（catch-all 路由，按 pathname `/sonic/netease/*`、`/sonic/qq/*` 分发）。
+3. 发布项目，获得一个 `.edgeone.app` 域名（如 `https://sonic-proxy.edgeone.app`）。
+4. 在前端设置面板填入该域名，或设置 `VITE_API_PROXY=https://sonic-proxy.edgeone.app`。
+
+前端 `/sonic/netease/*` 和 `/sonic/qq/*` 调用会自动转发到代理地址，代理再将请求转发到网易云 / QQ 上游。Cookie 通过请求头 `X-Netease-Cookie` / `X-QQ-Music-Cookie` 传递，用户在 `设置 → 账号登录` 网页端手填 / 粘贴 cookie 即可（无需弹窗登录）。
+
+### 桌面端功能差异
+
+- 网页端**不支持**网易云 / QQ 应用内登录窗口（Electron-only，需网页端手动填 cookie）。
+- 网页端**不支持**应用内自动更新（Electron-only）。
+- 网页端**不支持**自定义窗口控制栏（最小化 / 最大化 / 关闭 / 拖拽），由浏览器标题栏接管。
+- 网页端不支持网易云 / QQ 音乐音源后端（除非部署上述 EdgeOne Makers 代理）。
+- 网页端不支持系统音频采集（麦克风 / 系统环回），只支持本地文件上传播放。
+- 本地歌单已改为浏览器 localStorage（`sonic-topography-playlists-v1`），不再依赖 `/api/playlists` 后端。
 
 ## 开发运行
 

@@ -15,7 +15,7 @@ assert.equal(DEFAULT_STYLE_CONFIG.maxCharsPerLine, DEFAULT_MAX_CHARS_PER_LINE);
 assert.equal(DEFAULT_STYLE_CONFIG.spatialOrbitOffset, DEFAULT_SPATIAL_ORBIT_OFFSET);
 
 const empty = normalizeLyricsSettings({});
-assert.equal(empty.style, 'spatial-wall');
+assert.equal(empty.style, 'songyancai');
 assert.equal(empty.songyancai.activeFontSize, 43);
 assert.equal(empty.songyancai.inactiveFontSize, 15);
 assert.equal(empty.songyancai.maxCharsPerLine, DEFAULT_MAX_CHARS_PER_LINE);

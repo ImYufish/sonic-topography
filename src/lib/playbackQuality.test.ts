@@ -29,12 +29,12 @@ writePlaybackQualitySettingsStorage({ qqQuality: 'aac', neteaseBitrate: '192000'
 assert.deepEqual(readPlaybackQualitySettingsStorage(), { qqQuality: 'aac', neteaseBitrate: '192000' });
 
 assert.equal(
-  buildQQPlaybackUrl('/api/qq/audio', { mid: 'song mid', mediaMid: 'media/mid' }, { qqQuality: 'lossless', neteaseBitrate: '320000' }),
-  '/api/qq/audio?mid=song+mid&mediaMid=media%2Fmid&quality=lossless',
+  buildQQPlaybackUrl('/sonic/qq/audio', { mid: 'song mid', mediaMid: 'media/mid' }, { qqQuality: 'lossless', neteaseBitrate: '320000' }),
+  '/sonic/qq/audio?mid=song+mid&mediaMid=media%2Fmid&quality=lossless',
 );
 assert.equal(
-  buildNeteasePlaybackUrl('/api/netease/audio', '123', { qqQuality: 'exhigh', neteaseBitrate: '128000' }),
-  '/api/netease/audio?id=123&br=128000',
+  buildNeteasePlaybackUrl('/sonic/netease/audio', '123', { qqQuality: 'exhigh', neteaseBitrate: '128000' }),
+  '/sonic/netease/audio?id=123&br=128000',
 );
 
 console.log('playbackQuality tests passed');

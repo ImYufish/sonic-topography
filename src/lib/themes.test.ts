@@ -26,8 +26,8 @@ const storage = new Map<string, string>();
 };
 
 storage.clear();
-assert.equal(DEFAULT_THEME_ID, 'minimal-monochrome');
-assert.equal(readActiveThemeStorage(), 'minimal-monochrome');
+assert.equal(DEFAULT_THEME_ID, 'wine-signal');
+assert.equal(readActiveThemeStorage(), 'wine-signal');
 assert.deepEqual(readCustomThemeStorage(), [defaultCustomThemeSettings]);
 assert.equal(defaultCustomThemeSettings.background, '#ffffff');
 assert.equal(defaultCustomThemeSettings.cool, '#98d2bf');
@@ -99,7 +99,7 @@ storage.set(ACTIVE_THEME_STORAGE_KEY, 'ink-wash');
 assert.equal(readActiveThemeStorage(), 'ink-wash');
 
 storage.set(ACTIVE_THEME_STORAGE_KEY, 'missing-theme');
-assert.equal(readActiveThemeStorage(), 'minimal-monochrome');
+assert.equal(readActiveThemeStorage(), 'wine-signal');
 
 storage.set(ACTIVE_THEME_STORAGE_KEY, CUSTOM_THEME_ID);
 storage.set(ACTIVE_CUSTOM_THEME_STORAGE_KEY, 'custom-default');

@@ -48,7 +48,7 @@ export interface TrackInfo {
   url?: string;
 }
 
-export type MusicProvider = 'netease' | 'qq';
+export type MusicProvider = 'netease' | 'qq' | 'meting';
 
 export interface NeteaseSong {
   provider?: MusicProvider;
@@ -63,6 +63,10 @@ export interface NeteaseSong {
   album: string;
   duration: number;
   fee: number;
+  // Meting source extensions
+  metingServer?: string;
+  url?: string;
+  lyric?: string;
 }
 
 export interface SavedPlaylist {

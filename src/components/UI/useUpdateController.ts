@@ -86,8 +86,8 @@ export function useUpdateController(lang: Language) {
           }
           setDownloadJob(job);
           if (job.status === 'ready') {
-            if (window.sonicDesktop?.isDesktop && job.filePath) {
-              const result = await window.sonicDesktop.openUpdateInstaller(job.filePath);
+            if (job.filePath) {
+              const result = await window.sonicDesktop?.openUpdateInstaller(job.filePath);
               if (!result?.ok) {
                 setUpdateStatus(`${t('ui.text.344', lang)}${result?.error ? `: ${result.error}` : ''}`);
                 setShowUpdateReleaseFallback(true);
@@ -122,8 +122,8 @@ export function useUpdateController(lang: Language) {
 
   const openUpdateRelease = async () => {
     const releaseUrl = downloadJob?.releaseUrl || availableUpdate?.release?.htmlUrl || '';
-    if (!releaseUrl || !window.sonicDesktop?.isDesktop) return;
-    const result = await window.sonicDesktop.openUpdateRelease(releaseUrl);
+    if (!releaseUrl) return;
+    const result = await window.sonicDesktop?.openUpdateRelease(releaseUrl);
     if (!result?.ok) setUpdateStatus(`${t('ui.text.346', lang)}${result?.error ? `: ${result.error}` : ''}`);
   };
 

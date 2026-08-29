@@ -23,6 +23,7 @@ import { clampAnimationBlend, deriveKickFollowLowBands } from '../../lib/terrain
 import { COVER_SCREEN_POSITION, COVER_SCREEN_ROTATION, SpatialLyrics3D } from './SpatialLyrics3D';
 import { type LyricsSettings } from '../../lib/lyricsSettings';
 import { CAMERA_STATE_STORAGE_KEY, DEFAULT_CAMERA_STATE, normalizeCameraState } from '../../lib/sceneDefaults';
+import { resolveCoverUrl } from '../../lib/metingApi';
 
 extend({ MapShaderMaterial, CoverShaderMaterial, FloatingBlockShaderMaterial });
 
@@ -127,8 +128,11 @@ export function MapScene({
     if (coverUrl) {
       const loader = new THREE.TextureLoader();
       loader.setCrossOrigin('anonymous');
+      // 腾讯系图片 CDN 不返回 CORS 头，直连会导致 WebGL 读像素被污染、封面不显示；
+      // 这里统一包一层 CORS 图片代理（见 metingApi.resolveCoverUrl）。
+      const loadUrl = resolveCoverUrl(coverUrl);
       loader.load(
-        coverUrl,
+        loadUrl,
         (tex) => {
           tex.colorSpace = THREE.SRGBColorSpace;
           setCoverTexture(tex);

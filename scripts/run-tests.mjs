@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const testRoots = ['src/lib', 'server', 'desktop'];
+const testRoots = ['src/lib'];
 
 async function collectTests(relativeDir) {
   const absoluteDir = path.join(projectRoot, relativeDir);

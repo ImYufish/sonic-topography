@@ -3,78 +3,17 @@
   "productName": "Sonic Topography",
   "private": true,
   "version": "1.1.4",
-  "description": "A desktop music player and 3D audio visualizer.",
+  "description": "A web music player and 3D audio visualizer.",
   "author": "Sonic Topography",
   "type": "module",
-  "main": "desktop/main.js",
   "scripts": {
     "dev": "vite --port=3000 --host=127.0.0.1",
-    "dev:electron": "node scripts/dev-electron.mjs",
     "test": "node scripts/run-tests.mjs && vitest run",
     "test:unit": "node scripts/run-tests.mjs",
     "test:ui": "vitest run",
     "build": "vite build",
-    "build:electron": "npm run build && electron-builder --win nsis",
-    "build:electron:dir": "npm run build && electron-builder --win dir",
-    "start": "electron .",
     "preview": "vite preview",
     "lint": "tsc --noEmit"
-  },
-  "build": {
-    "appId": "com.sonic-topography.desktop",
-    "productName": "Sonic Topography",
-    "directories": {
-      "output": "release"
-    },
-    "electronDist": "node_modules/electron/dist",
-    "files": [
-      "desktop/**/*",
-      "dist/**/*",
-      "server/**/*",
-      "local-server.mjs",
-      "package.json"
-    ],
-    "asar": true,
-    "win": {
-      "icon": "build/icon.ico",
-      "executableName": "SonicTopography",
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        }
-      ]
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "installerIcon": "build/icon.ico",
-      "uninstallerIcon": "build/icon.ico",
-      "shortcutName": "Sonic Topography",
-      "artifactName": "SonicTopography-${version}-Setup.${ext}"
-    }
-  },
-  "sonicTopography": {
-    "update": {
-      "provider": "github",
-      "owner": "yin-yizhen",
-      "repo": "sonic-topography",
-      "downloadMirrors": [
-        {
-          "name": "GH Proxy",
-          "prefix": "https://gh-proxy.com/"
-        },
-        {
-          "name": "GHFast",
-          "prefix": "https://ghfast.top/"
-        }
-      ]
-    }
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -84,9 +23,9 @@
     "@vitejs/plugin-react": "^5.0.4",
     "clsx": "^2.1.1",
     "dotenv": "^17.2.3",
-    "express": "^4.21.2",
     "framer-motion": "^12.40.0",
     "jsmediatags": "^3.9.7",
+    "json5": "^2.2.3",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "music-metadata-browser": "^2.5.11",
@@ -99,13 +38,10 @@
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
-    "@types/express": "^4.17.21",
     "@types/jsmediatags": "^3.9.6",
     "@types/node": "^22.14.0",
     "@types/three": "^0.184.1",
     "autoprefixer": "^10.4.21",
-    "electron": "^42.5.0",
-    "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
     "jsdom": "^26.1.0",
     "tailwindcss": "^4.1.14",

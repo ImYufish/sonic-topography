@@ -1,3 +1,5 @@
+import { getSiteConfig } from './siteConfig';
+
 export const GROUND_EQ_STORAGE_KEY = 'sonic-topography-ground-eq-v1';
 export const GROUND_EQ_BAND_COUNT = 8;
 export const DEFAULT_GROUND_EQ_VALUE = 50;
@@ -133,39 +135,33 @@ export function normalizeGroundEqSettings(value: Partial<StoredGroundEqSettings>
 }
 
 export function readGroundEqSettingsStorage(): StoredGroundEqSettings {
-  if (typeof window === 'undefined') {
-    return {
-      bands: defaultGroundEqBands,
-      motionSpeed: DEFAULT_GROUND_MOTION_SPEED,
-      amplitude: DEFAULT_GROUND_AMPLITUDE,
-      terrainDensity: DEFAULT_TERRAIN_DENSITY,
-      floatingBlocksEnabled: DEFAULT_FLOATING_BLOCKS_ENABLED,
-      floatingBlockIntensity: DEFAULT_FLOATING_BLOCK_INTENSITY,
-      floatingBlockMinSize: DEFAULT_FLOATING_BLOCK_MIN_SIZE,
-      floatingBlockMaxSize: DEFAULT_FLOATING_BLOCK_MAX_SIZE,
-      floatingBlockSpeed: DEFAULT_FLOATING_BLOCK_SPEED,
-      enabledBands: new Array(GROUND_EQ_BAND_COUNT).fill(true),
-    };
-  }
+  const fallback: StoredGroundEqSettings = {
+    bands: defaultGroundEqBands,
+    motionSpeed: DEFAULT_GROUND_MOTION_SPEED,
+    amplitude: DEFAULT_GROUND_AMPLITUDE,
+    terrainDensity: DEFAULT_TERRAIN_DENSITY,
+    floatingBlocksEnabled: DEFAULT_FLOATING_BLOCKS_ENABLED,
+    floatingBlockIntensity: DEFAULT_FLOATING_BLOCK_INTENSITY,
+    floatingBlockMinSize: DEFAULT_FLOATING_BLOCK_MIN_SIZE,
+    floatingBlockMaxSize: DEFAULT_FLOATING_BLOCK_MAX_SIZE,
+    floatingBlockSpeed: DEFAULT_FLOATING_BLOCK_SPEED,
+    enabledBands: new Array(GROUND_EQ_BAND_COUNT).fill(true),
+  };
+
+  if (typeof window === 'undefined') return fallback;
 
   try {
     const raw = window.localStorage.getItem(GROUND_EQ_STORAGE_KEY);
-    return normalizeGroundEqSettings(raw ? JSON.parse(raw) : undefined);
+    if (raw) return normalizeGroundEqSettings(JSON.parse(raw));
   } catch (error) {
     console.warn('Unable to read ground EQ settings:', error);
-    return {
-      bands: defaultGroundEqBands,
-      motionSpeed: DEFAULT_GROUND_MOTION_SPEED,
-      amplitude: DEFAULT_GROUND_AMPLITUDE,
-      terrainDensity: DEFAULT_TERRAIN_DENSITY,
-      floatingBlocksEnabled: DEFAULT_FLOATING_BLOCKS_ENABLED,
-      floatingBlockIntensity: DEFAULT_FLOATING_BLOCK_INTENSITY,
-      floatingBlockMinSize: DEFAULT_FLOATING_BLOCK_MIN_SIZE,
-      floatingBlockMaxSize: DEFAULT_FLOATING_BLOCK_MAX_SIZE,
-      floatingBlockSpeed: DEFAULT_FLOATING_BLOCK_SPEED,
-      enabledBands: new Array(GROUND_EQ_BAND_COUNT).fill(true),
-    };
   }
+
+  // 回退站点配置（public/site-config.json5 的 groundEqSettings）。
+  const site = getSiteConfig()?.groundEqSettings;
+  if (site && typeof site === 'object') return normalizeGroundEqSettings(site);
+
+  return fallback;
 }
 
 export function writeGroundEqSettingsStorage(settings: StoredGroundEqSettings) {

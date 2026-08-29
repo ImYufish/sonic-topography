@@ -32,7 +32,7 @@ assert.equal(preset.data.groundEqSettings.floatingBlockMinSize, 9);
 assert.equal(preset.data.groundEqSettings.floatingBlockMaxSize, 26);
 assert.equal(preset.data.groundEqSettings.floatingBlockSpeed, 77);
 assert.equal(preset.data.lyricsSettings?.songyancai.maxCharsPerLine, 24);
-assert.equal(preset.data.lyricsSettings?.style, 'spatial-wall');
+assert.equal(preset.data.lyricsSettings?.style, 'songyancai');
 assert.equal(preset.data.lyricsSettings?.['spatial-wall'].spatialOrbitOffset, -38);
 
 preset = createPresetTransferPackage({ includeCookies: true });

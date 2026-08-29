@@ -192,7 +192,7 @@ canvas {
 }
 
 .side-nav-panel .side-nav-bottom {
-  gap: 12px;
+  gap: 24px;
   width: 100%;
 }
 
@@ -248,80 +248,47 @@ canvas {
   }
 }
 
-@media (max-width: 600px) {
+@media (max-width: 768px) {
+  /* 播放条：移动端三行布局。第一行：封面+歌名/歌手+平台；第二行：起始时间+进度条+结束时间；第三行：菜单|循环|上一首|播放|下一首|歌词|主题|音量 */
   .player-panel {
-    align-items: center;
-    bottom: 12px;
-    flex-wrap: nowrap;
-    gap: 10px;
-    left: 12px;
-    padding: 10px 12px;
-    right: 12px;
-    top: auto;
-    width: auto;
-    z-index: 58;
-    transform: none;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch;
+    gap: 8px !important;
+    padding: 14px 16px !important;
+    min-height: 128px;
   }
 
-
-  .player-panel-cover-wrap {
-    min-height: 52px;
-  }
-
-  .player-panel-cover {
-    height: 44px;
-    width: 44px;
-  }
-
-  .player-panel-header {
-    align-items: center;
-    flex: 1 1 auto;
-    gap: 10px;
-    margin-bottom: 0;
-    min-width: 0;
-  }
-
-  .player-panel-title {
-    flex: 1 1 auto;
-    font-size: 14px;
-    letter-spacing: 0;
-    line-height: 1.2;
-    min-width: 0;
-  }
-
-  .player-panel-title-marquee {
-    font-size: 14px;
-    height: 18px;
-    letter-spacing: 0;
-    line-height: 18px;
-  }
-
-  .player-panel-theme {
+  .player-panel > div {
     flex: 0 0 auto;
   }
 
-  .player-panel-meta,
-  .player-panel-progress,
-  .player-panel-time,
-  .player-panel-volume {
-    display: none !important;
+  /* 时间标签在三行布局里要保留，不能隐藏 */
+  .player-panel .player-progress > span:first-child,
+  .player-panel .player-progress > span:last-child {
+    display: inline !important;
   }
 
-  .player-panel-controls {
-    flex: 0 0 auto;
-    gap: 0;
-    grid-template-columns: minmax(0, 1fr);
-    justify-content: flex-end;
-  }
-
-  .player-panel-actions {
-    gap: 12px;
-  }
-
-  .player-panel-actions button {
-    align-items: center;
+  /* 移动端第三行按钮放大，方便点击 */
+  .player-panel button {
+    min-width: 32px;
+    min-height: 32px;
     display: inline-flex;
+    align-items: center;
     justify-content: center;
+  }
+
+  .player-panel button svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  /* 移动端音量：竖向滑块，从下往上调节，避免横向宽度溢出 */
+  .vol-vertical {
+    writing-mode: vertical-lr;
+    direction: rtl;
+    width: 6px;
+    height: 96px;
   }
 
   .mobile-hide-aux-ui {
@@ -329,11 +296,98 @@ canvas {
   }
 
   .side-nav-panel {
-    padding: 20px 10px;
+    padding: 84px 10px 20px;
   }
 
   .side-nav-panel button {
     font-size: 14px !important;
     min-height: 46px;
+    height: 46px;
+    margin-bottom: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* 左侧面板在移动端需要显式 pointer-events 与足够层级，避免被其他元素吞掉点击 */
+  .side-nav-panel {
+    pointer-events: auto;
+  }
+
+  /* 移动端悬浮面板：全宽、贴顶、可滚动，底部预留播放条区域（~150px） */
+  .sonic-panel {
+    left: 8px !important;
+    right: 8px !important;
+    top: 56px !important;
+    bottom: 156px !important;
+    width: auto !important;
+    max-height: none !important;
+  }
+
+  .sonic-panel-body {
+    width: 100% !important;
+    max-height: 100% !important;
+    padding: 16px !important;
+  }
+
+  /* 右侧歌单面板：占满屏幕，去掉固定 540px 双栏宽度，高度避开底部播放条 */
+  .sonic-right-col {
+    width: 100vw !important;
+  }
+
+  .side-nav-trigger-right,
+  .side-nav-trigger-right.is-mobile-open-right {
+    width: 100vw;
+  }
+
+  .side-nav-panel-right {
+    width: 100vw !important;
+    top: 56px !important;
+    height: calc(100vh - 56px - 170px) !important;
+  }
+
+  .side-nav-panel-right aside {
+    height: 100% !important;
+  }
+
+  /* 设置面板内的多列表单网格在窄屏降级为单列（不影响 GroundEq 的 8 段均衡器，它靠横向滚动） */
+  .sonic-stack-mobile {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 16px !important;
+  }
+
+  /* 歌词主时间线容器：去掉固定 800px 宽度与 left:80px，移动端占满屏幕，关闭 3D 倾斜避免溢出与变形 */
+  .lyrics-main-container {
+    left: 8px !important;
+    right: 8px !important;
+    width: auto !important;
+    top: 22vh !important;
+  }
+
+  .lyrics-inner-pad {
+    padding-left: 14px !important;
+    padding-right: 14px !important;
+    transform: none !important;
+  }
+
+  /* 设置面板标签栏横向滚动，避免 9 个 tab 溢出 */
+  .sonic-tabs {
+    flex-wrap: nowrap !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 4px;
+    scrollbar-width: none;
+  }
+
+  .sonic-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .sonic-tabs button {
+    flex: 0 0 auto;
+    white-space: nowrap;
   }
 }

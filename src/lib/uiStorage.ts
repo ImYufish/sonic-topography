@@ -1,6 +1,7 @@
 import type { SavedPlaylist } from '../types';
+import { getSiteConfig } from './siteConfig';
 
-export type SearchProvider = 'netease' | 'qq';
+export type SearchProvider = 'netease' | 'qq' | 'meting';
 
 export const PLAYLIST_STORAGE_KEY = 'sonic-topography-playlists-v1';
 const SIDE_NAV_HINT_STORAGE_KEY = 'sonic-topography-side-nav-hint-seen-v1';
@@ -52,7 +53,14 @@ export function writeSideNavHintSeen(storage?: Storage) {
 }
 
 export function readSearchProviderStorage(storage?: Storage): SearchProvider {
-  return getStorage(storage)?.getItem(SEARCH_PROVIDER_STORAGE_KEY) === 'qq' ? 'qq' : 'netease';
+  const stored = getStorage(storage)?.getItem(SEARCH_PROVIDER_STORAGE_KEY);
+  if (stored === 'netease' || stored === 'qq' || stored === 'meting') return stored;
+  // 回退到站点配置文件（public/site-config.json5）的部署默认
+  const site = getSiteConfig();
+  if (site?.searchProvider === 'netease' || site?.searchProvider === 'qq' || site?.searchProvider === 'meting') {
+    return site.searchProvider;
+  }
+  return 'meting';
 }
 
 export function writeSearchProviderStorage(provider: SearchProvider, storage?: Storage) {

@@ -4,6 +4,8 @@ export type LyricsFontFamily = 'serif' | 'sans-serif';
 export type LyricsStyleType = 'songyancai' | 'dynamic-bounce' | 'spatial-wall';
 import { clampMaxCharsPerLine } from './lyricLineWrapping';
 
+import { getSiteConfig } from './siteConfig';
+
 export const MAX_CHARS_PER_LINE_MIN = 8;
 export const MAX_CHARS_PER_LINE_MAX = 48;
 export const DEFAULT_MAX_CHARS_PER_LINE = 24;
@@ -49,7 +51,7 @@ export const DEFAULT_STYLE_CONFIG: LyricStyleConfig = {
 };
 
 export const DEFAULT_LYRICS_SETTINGS: LyricsSettings = {
-  style: 'spatial-wall',
+  style: 'songyancai',
   songyancai: {
     ...DEFAULT_STYLE_CONFIG,
     activeFontSize: 43,
@@ -77,7 +79,7 @@ export const DEFAULT_LYRICS_SETTINGS: LyricsSettings = {
   },
 };
 
-const STORAGE_KEY = 'sonic_topography_lyrics_settings';
+export const STORAGE_KEY = 'sonic_topography_lyrics_settings';
 
 function normalizeStyleConfig(value: any, fallback: LyricStyleConfig = DEFAULT_STYLE_CONFIG): LyricStyleConfig {
   return {
@@ -139,6 +141,11 @@ export function readLyricsSettingsStorage(): LyricsSettings {
   } catch (e) {
     console.error('Failed to read lyrics settings from storage', e);
   }
+
+  // 回退站点配置（public/site-config.json5 的 lyricsSettings）。
+  const site = getSiteConfig()?.lyricsSettings;
+  if (site && typeof site === 'object') return normalizeLyricsSettings(site);
+
   return normalizeLyricsSettings(DEFAULT_LYRICS_SETTINGS);
 }
 

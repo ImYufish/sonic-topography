@@ -1,0 +1,110 @@
+{
+  // ============================================================
+  // Sonic Topography 站点级配置文件（随静态站部署，对所有访客生效）
+  // 优先级：网页内 localStorage 个人覆盖  >  本文件部署默认  >  代码内置默认
+  // 改完本文件重新部署站点即可对所有访客生效。
+  // 本文件支持注释（// 与 /* */），加载时会自动剥离，不影响解析。
+  // ============================================================
+
+  // ===== 音乐 / 音源 =====
+  // 启动自动加载的 Meting 歌单 ID 列表；第一个作为启动播放队列，其余仅预填进「歌单」列表。
+  "defaultPlaylistIds": ["7991874132", "7991911607"],
+  // 默认搜索源：meting
+  "searchProvider": "meting",
+  // Meting 接口 Base URL（注意路径带 /api）。也可写在 public/meting-config.json 的 base 字段。
+  "metingBase": "https://meting.yufish.cn/api",
+  // 默认音源：tencent / kugou / netease（部分服务端 type=url 会 404）。
+  "metingServer": "tencent",
+  // 默认码率（字符串）：128 / 192 / 320。仅作展示与音质面板联动；Meting 实例实际不接收 br 参数。
+  "metingBitrate": "320",
+  // 封面图片代理地址。留空 "" 则回退内置默认 https://proxy-api.x1anyu.cn/pic/?url=
+  // 用途：给腾讯/网易图床补 Access-Control-Allow-Origin，供 3D 封面纹理读取像素。
+  "picProxy": "",
+
+  // ===== 主题 / 外观（Color 面板）=====
+  // 当前主题 id：内置主题 id（见下）或 "custom"。
+  //   可选内置主题：ink-wash / nocturnal / neon-tokyo / cyber-forest / minimal-monochrome /
+  //                glacier-day / koi-pond / coral-reef / moss-glass / blue-hour /
+  //                porcelain-teal / wine-signal / daybreak-lime
+  "theme": "wine-signal",
+  // 预置的自定义主题列表（Color 面板「新建主题」的预设）。留空数组表示不预置自定义主题。
+  "customThemes": [
+    // 示例：取消下面一整行注释即可预置一个自定义主题（id 需唯一）
+    // { "id": "custom-1", "name": "示例主题", "background": "#101015", "fog": "#101015", "fogLinkedToBackground": true, "cool": "#4fd1c5", "warm": "#f472b6", "accent": "#a78bfa", "glowIntensity": 1.1 }
+  ],
+  // theme === "custom" 时选中的自定义主题 id（对应 customThemes 里的 id）。
+  "activeCustomThemeId": "custom-default",
+  // 主题轮播（Color 面板「主题轮换」）。enabled=false 时不轮播。
+  "themeRotation": {
+    "enabled": false,
+    "intervalSeconds": 10,
+    "themeIds": [
+      "glacier-day", "koi-pond", "neon-tokyo", "coral-reef", "cyber-forest", "moss-glass",
+      "blue-hour", "minimal-monochrome", "porcelain-teal", "wine-signal", "daybreak-lime",
+      "custom-default", "ink-wash", "nocturnal"
+    ]
+  },
+
+  // ===== 歌词（Lyrics 面板）=====
+  // style：用哪种歌词样式（songyancai 宋延彩 / dynamic-bounce 弹跳 / spatial-wall 3D 环绕）。
+  // 每种样式一套参数：activeFontSize 当前行字号、inactiveFontSize 其他行字号、maxCharsPerLine 单行上限(8~48)、
+  //   fontColor 文字色、glowColor 辉光色、followThemeGlow 辉光跟随主题、
+  //   karaokeColor 逐字高亮色、followThemeKaraoke 高亮跟随主题、
+  //   position 位置(center/center-left/top-center...)、triggerBand 触发频段、fontFamily 字体、spatialOrbitOffset 环绕偏移(-180~180)。
+  "lyricsSettings": {
+    "style": "songyancai",
+    "songyancai": { "activeFontSize": 43, "inactiveFontSize": 15, "maxCharsPerLine": 24, "fontColor": "#ffffff", "glowColor": "#00ffff", "followThemeGlow": true, "karaokeColor": "#f21818", "followThemeKaraoke": true, "position": "center", "triggerBand": "subBass", "fontFamily": "serif", "spatialOrbitOffset": 0 },
+    "dynamic-bounce": { "activeFontSize": 64, "inactiveFontSize": 16, "maxCharsPerLine": 48, "fontColor": "#ffffff", "glowColor": "#ffffff", "followThemeGlow": false, "karaokeColor": "#969292", "followThemeKaraoke": true, "position": "center", "triggerBand": "subBass", "fontFamily": "sans-serif", "spatialOrbitOffset": 0 },
+    "spatial-wall": { "activeFontSize": 30, "inactiveFontSize": 28, "maxCharsPerLine": 27, "fontColor": "#ffffff", "glowColor": "#00ffff", "followThemeGlow": true, "karaokeColor": "#00ffff", "followThemeKaraoke": true, "position": "center-left", "triggerBand": "subBass", "fontFamily": "sans-serif", "spatialOrbitOffset": -38 }
+  },
+
+  // ===== 显示 / 界面（Display 面板）=====
+  // showLeftIcon/showRightIcon：左右菜单图标显隐；showBottomPlayer：底部播放条；showLyrics/showCover：歌词/封面显隐。
+  // clock：时钟（visible 显隐、position 位置、size 字号、color 颜色、followThemeColor 跟随主题、opacity 透明度 0~1）。
+  // shortcuts：快捷键（playPause 播放暂停、prevSong 上一首、nextSong 下一首）。
+  "displaySettings": {
+    "showLeftIcon": false,
+    "showRightIcon": false,
+    "showBottomPlayer": true,
+    "showLyrics": true,
+    "showCover": true,
+    "clock": { "visible": false, "position": "top-center", "size": 200, "color": "#f50000", "followThemeColor": true, "opacity": 0.7 },
+    "shortcuts": { "playPause": "Space", "prevSong": "Ctrl+ArrowLeft", "nextSong": "Ctrl+ArrowRight" }
+  },
+
+  // ===== 音频质量（Audio 面板）=====
+  // qqQuality：QQ 音源品质（exhigh 320k / standard 128k / aac / lossless 无损）。
+  // neteaseBitrate：网易云码率（320000 / 192000 / 128000）。网页版走 Meting 时以 metingBitrate 为准。
+  "playbackQualitySettings": { "qqQuality": "exhigh", "neteaseBitrate": "320000" },
+
+  // ===== 地面均衡器 / 漂浮方块（GroundEq 面板）=====
+  // bands：8 段频带增益(0~100)，顺序 subBass/bass/lowMid/mid/highMid/presence/brilliance/air。
+  // motionSpeed 运动速度、amplitude 振幅、terrainDensity 地形密度(0~100)、
+  // floatingBlocksEnabled 漂浮方块开关、floatingBlockIntensity 强度、floatingBlockMinSize/MaxSize 尺寸、floatingBlockSpeed 速度、floatingBlockCount 数量(0~100)、
+  // enabledBands：各频段是否启用(8 个布尔)。
+  "groundEqSettings": {
+    "bands": [90, 92, 50, 50, 50, 50, 50, 48],
+    "motionSpeed": 50,
+    "amplitude": 50,
+    "terrainDensity": 46,
+    "floatingBlocksEnabled": true,
+    "floatingBlockIntensity": 55,
+    "floatingBlockMinSize": 9,
+    "floatingBlockMaxSize": 26,
+    "floatingBlockSpeed": 77,
+    "floatingBlockCount": 80,
+    "enabledBands": [true, true, true, true, true, true, true, true]
+  },
+
+  // ===== 全局场景 =====
+  // rotationSpeed：场景整体旋转速度（数值越大转得越快）。
+  "globalSceneSettings": { "rotationSpeed": 0.15 },
+
+  // ===== 移动端专属默认（仅视口 ≤768px 或触屏设备生效）=====
+  // 给手机/平板单独定一套默认值，不影响桌面端。目前支持：
+  //   lyricsStyle：移动端首次访问（尚未在本地自定义过歌词样式）时的默认歌词样式。
+  //     默认 "spatial-wall"（3D 环绕，适合小屏）；可改 "songyancai"（散落）/ "dynamic-bounce"（弹跳）。
+  "mobile": {
+    "lyricsStyle": "spatial-wall"
+  }
+}

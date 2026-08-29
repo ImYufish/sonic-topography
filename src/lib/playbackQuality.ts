@@ -1,3 +1,5 @@
+import { getSiteConfig } from './siteConfig';
+
 export type QQPlaybackQuality = 'lossless' | 'exhigh' | 'standard' | 'aac';
 export type NeteasePlaybackBitrate = '320000' | '192000' | '128000';
 
@@ -45,10 +47,16 @@ export function readPlaybackQualitySettingsStorage(): PlaybackQualitySettings {
   if (typeof window === 'undefined') return DEFAULT_PLAYBACK_QUALITY_SETTINGS;
   try {
     const raw = window.localStorage.getItem(PLAYBACK_QUALITY_STORAGE_KEY);
-    return normalizePlaybackQualitySettings(raw ? JSON.parse(raw) : null);
+    if (raw) return normalizePlaybackQualitySettings(JSON.parse(raw));
   } catch (error) {
-    return DEFAULT_PLAYBACK_QUALITY_SETTINGS;
+    console.warn('Unable to read playback quality settings:', error);
   }
+
+  // 回退站点配置（public/site-config.json5 的 playbackQualitySettings）。
+  const site = getSiteConfig()?.playbackQualitySettings;
+  if (site && typeof site === 'object') return normalizePlaybackQualitySettings(site);
+
+  return DEFAULT_PLAYBACK_QUALITY_SETTINGS;
 }
 
 export function writePlaybackQualitySettingsStorage(settings: PlaybackQualitySettings) {

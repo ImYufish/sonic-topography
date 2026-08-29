@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Play, Pause, Volume2, SkipForward, SkipBack, Palette, Plus, ListMusic, Shuffle, Repeat, Repeat1, Trash2, Minus, Square, X, Search, Lock, Unlock, Menu, Settings, Pin, ChevronDown, ChevronUp, Mic } from 'lucide-react';
+import { Play, Pause, Volume2, VolumeX, SkipForward, SkipBack, Palette, Plus, ListMusic, Shuffle, Repeat, Repeat1, Trash2, Minus, Square, X, Search, Lock, Unlock, Menu, Settings, Pin, ChevronDown, ChevronUp, ChevronLeft } from 'lucide-react';
 import { engine } from '../../lib/AudioEngine';
 import { BUILT_IN_THEME_IDS, CUSTOM_THEME_ID, createCustomThemePreset, themes, type CustomThemeSettings, type ThemeColors, type ThemeRotationSettings } from '../../lib/themes';
 import {
@@ -18,7 +18,6 @@ import {
   type StoredGroundEqSettings,
 } from '../../lib/groundEqSettings';
 import { LyricsDisplay } from './LyricsDisplay';
-import { SplashScreen } from './SplashScreen';
 
 import {
   readDisplaySettingsStorage,
@@ -77,7 +76,6 @@ import {
   writePinnedNeteasePlaylistsStorage,
   writePinnedQQPlaylistsStorage,
   writeSavedPlaylists,
-  writeSearchProviderStorage,
   writeSideNavHintSeen,
   type SearchProvider,
 } from '../../lib/uiStorage';
@@ -98,9 +96,26 @@ import {
   searchCloudMusic,
   syncNeteaseProxyCookie,
   syncQQProxyCookie,
+  api,
+  getApiProxyStorage,
+  setApiProxyStorage,
 } from '../../lib/musicApi';
+import {
+  getMetingServer,
+  getMetingBitrate,
+  resolveMetingBase,
+  searchMeting,
+  getMetingSongUrl,
+  getMetingLyric,
+  getMetingPlaylist,
+  warmCoverCache,
+  setMetingBase,
+  setMetingServer,
+  setMetingBitrate,
+  type MetingServer,
+} from '../../lib/metingApi';
+import { loadSiteConfig, getSiteConfig } from '../../lib/siteConfig';
 import { formatBytes, useUpdateController } from './useUpdateController';
-import { useAudioInputController } from './useAudioInputController';
 
 interface UIProps {
   theme: string;
@@ -135,12 +150,17 @@ type PendingDelete =
 
 const baseUrl = import.meta.env.BASE_URL || '/';
 
+// 网页版默认启动时自动加载的歌单（QQ 音乐 / tencent）。仅 Meting 音源，无需任何账号或代理。
+// 第一个歌单负责自动播放第一首；其余歌单仅加载并落到本地「歌单」列表。
+const DEFAULT_METING_PLAYLIST_IDS = ['7991874132', '7991911607'];
+
 function songIdentity(song: Pick<NeteaseSong, 'id' | 'provider'>) {
   return `${song.provider || 'netease'}:${String(song.id)}`;
 }
 
 function songSourceLabel(song: NeteaseSong | null) {
   if (!song) return 'Local Audio';
+  if (song.provider === 'meting') return 'Meting';
   return song.provider === 'qq' ? 'QQ Music' : 'Netease Cloud';
 }
 
@@ -330,12 +350,6 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
   const fileInputRef = useRef<HTMLInputElement>(null);
   const demoAudioUrl = `${baseUrl}demo.mp3`;
   const demoLyricsUrl = `${baseUrl}demo.lrc`;
-  const [showSplash, setShowSplash] = useState(true);
-
-  const handleSplashComplete = () => {
-    setShowSplash(false);
-    // 在这里可以执行额外的初始化，如加载音频等
-  };
   const [isPlaying, setIsPlaying] = useState(false);
   const [trackName, setTrackName] = useState<string>('No track selected');
   const [lyricsText, setLyricsText] = useState<string>('');
@@ -355,14 +369,24 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
   useEffect(() => {
     engine.setVolume(volume);
   }, []);
+  // 移动端静音切换：记录静音前的音量，恢复时还原
+  const muteToggle = () => {
+    setMuted((prev) => {
+      const next = !prev;
+      engine.setVolume(next ? 0 : (volume > 0 ? volume : 1));
+      return next;
+    });
+  };
   const [isDragging, setIsDragging] = useState(false);
   const [showOptionsPanel, setShowOptionsPanel] = useState(false);
-  const [showAudioInputPanel, setShowAudioInputPanel] = useState(false);
   const [isBottomPanelOpen, setIsBottomPanelOpen] = useState(false);
   const [displaySettings, setDisplaySettings] = useState<DisplaySettings>(readDisplaySettingsStorage);
   const [playbackQualitySettings, setPlaybackQualitySettings] = useState<PlaybackQualitySettings>(readPlaybackQualitySettingsStorage);
   const [showSearchPanel, setShowSearchPanel] = useState(false);
   const [showNeteasePanel, setShowNeteasePanel] = useState(false);
+  const [showMetingPanel, setShowMetingPanel] = useState(false);
+  const [metingPlaylistId, setMetingPlaylistId] = useState('');
+  const [metingPanelServer, setMetingPanelServer] = useState<MetingServer>(getMetingServer);
   const [cloudProvider, setCloudProvider] = useState<CloudProvider>('netease');
   const [searchProvider, setSearchProviderState] = useState<SearchProvider>(readSearchProviderStorage);
   const [searchQuery, setSearchQuery] = useState('');
@@ -380,6 +404,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
   const [activePlaylistId, setActivePlaylistId] = useState('favorites');
   const [songToAdd, setSongToAdd] = useState<NeteaseSong | null>(null);
   const [newPlaylistName, setNewPlaylistName] = useState('');
+  const [songsToAddAll, setSongsToAddAll] = useState<NeteaseSong[] | null>(null);
   const [playMode, setPlayMode] = useState<PlayMode>('sequence');
   const [playQueue, setPlayQueue] = useState<NeteaseSong[]>([]);
   const [currentSongId, setCurrentSongId] = useState<number | string | null>(null);
@@ -391,35 +416,6 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     }
   };
 
-  const {
-    audioInputMode,
-    audioInputDevices,
-    selectedAudioInputId,
-    audioInputStatus,
-    setAudioInputMode,
-    setSelectedAudioInputId,
-    setAudioInputStatus,
-    refreshAudioInputDevices,
-    startSystemAudioInput,
-    startMicrophoneInput,
-    returnToPlayerInput,
-  } = useAudioInputController({
-    currentTrackName: trackName,
-    hasCurrentSong: Boolean(currentSong),
-    onPrepareExternalInput: (label) => {
-      setTrackName(label);
-      setCurrentSong(null);
-      setCurrentSongId(null);
-      setCurrentCover('');
-      setLyricsText('');
-      setSearchStatus('');
-      setShowSearchPanel(false);
-      setShowNeteasePanel(false);
-    },
-    onResetDisconnectedInput: () => setTrackName('No track selected'),
-    onReturnToPlayer: () => setTrackName('No track selected'),
-    onClosePanel: () => setShowAudioInputPanel(false),
-  });
 
   useEffect(() => {
     onCurrentLyricsChange?.(lyricsText);
@@ -443,9 +439,27 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
   const [isQQCookieValid, setIsQQCookieValid] = useState(false);
   const [isSyncingNeteaseCookie, setIsSyncingNeteaseCookie] = useState(false);
   const [isSyncingQQCookie, setIsSyncingQQCookie] = useState(false);
-  const [desktopLoginStatus, setDesktopLoginStatus] = useState('');
   const [isMobileSideNavOpen, setIsMobileSideNavOpen] = useState(false);
   const [isRightSidebarOpen, setIsRightSidebarOpen] = useState(false);
+  // 移动端右侧歌单面板的两级视图：'list' 先显示歌单列表，'detail' 点进去显示某歌单的歌曲
+  const [mobileRightView, setMobileRightView] = useState<'list' | 'detail'>('list');
+  // 移动端音量：点击音量图标弹出向上调节条，再点收起；muted 记录静音状态
+  const [showMobileVolume, setShowMobileVolume] = useState(false);
+  const [muted, setMuted] = useState(false);
+  // 运行时判断是否移动端（窄屏或触屏）。用于在手机上强制显示左右开关、切换触控交互。
+  // 断点放宽到 768px 并叠加触屏检测：横屏手机/平板视口常 >600px，仅靠 600px 会漏判。
+  const MOBILE_MQ = '(max-width: 768px), (pointer: coarse)';
+  const [isMobile, setIsMobile] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.matchMedia(MOBILE_MQ).matches : false
+  );
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const mq = window.matchMedia(MOBILE_MQ);
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    mq.addEventListener('change', handler);
+    setIsMobile(mq.matches);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
   const [fetchedNeteasePlaylists, setFetchedNeteasePlaylists] = useState<NeteasePlaylistSummary[]>([]);
   const [fetchedQQPlaylists, setFetchedQQPlaylists] = useState<NeteasePlaylistSummary[]>([]);
   const [pinnedNeteasePlaylists, setPinnedNeteasePlaylists] = useState<string[]>(readPinnedNeteasePlaylistsStorage);
@@ -466,17 +480,13 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [presetTransferStatus, setPresetTransferStatus] = useState('');
   const hasLoadedPlaylistsRef = useRef(false);
+  // 歌单歌曲列表的滚动容器：用于「打开歌单自动聚焦到当前播放的歌」
+  const playlistPanelScrollRef = useRef<HTMLDivElement | null>(null);
+  const rightTracksScrollRef = useRef<HTMLDivElement | null>(null);
   const hasBothCloudLogins = isNeteaseCookieValid && isQQCookieValid;
-  const effectiveSearchProvider: SearchProvider = hasBothCloudLogins
-    ? searchProvider
-    : (isQQCookieValid && !isNeteaseCookieValid ? 'qq' : 'netease');
+  const effectiveSearchProvider: SearchProvider = searchProvider;
   const activeCloudLabel = cloudProvider === 'qq' ? t('ui.text.1', lang) : t('ui.text.2', lang);
-  const effectiveSearchLabel = effectiveSearchProvider === 'qq' ? t('ui.text.3', lang) : t('ui.text.4', lang);
-
-  const setSearchProvider = (provider: SearchProvider) => {
-    setSearchProviderState(provider);
-    writeSearchProviderStorage(provider);
-  };
+  const effectiveSearchLabel = 'Meting';
 
   const markSideNavHintSeen = () => {
     if (hasSeenSideNavHint) return;
@@ -491,7 +501,6 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
 
   const closeFloatingPanels = () => {
     setShowOptionsPanel(false);
-    setShowAudioInputPanel(false);
     setShowSearchPanel(false);
     setShowNeteasePanel(false);
     setShowPlaylistPanel(false);
@@ -500,7 +509,6 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
   };
 
   const openOptionsPanel = () => {
-    setShowAudioInputPanel(false);
     setShowSearchPanel(false);
     setShowNeteasePanel(false);
     setShowPlaylistPanel(false);
@@ -510,7 +518,6 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
 
   const openSearchPanel = () => {
     setShowOptionsPanel(false);
-    setShowAudioInputPanel(false);
     setShowNeteasePanel(false);
     setShowPlaylistPanel(false);
     setShowSearchPanel(true);
@@ -520,36 +527,45 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
   const openCloudPanel = (provider: CloudProvider) => {
     setCloudProvider(provider);
     setShowOptionsPanel(false);
-    setShowAudioInputPanel(false);
     setShowSearchPanel(false);
     setShowPlaylistPanel(false);
     setShowNeteasePanel(true);
     setIsMobileSideNavOpen(false);
   };
 
-  const openCloudPanelDefault = (provider: CloudProvider) => {
-    openCloudPanel(provider);
-    if (provider === 'qq') loadLikedSongs(provider);
-    else loadDailyRecommendations();
+  const openMetingPanel = () => {
+    setShowOptionsPanel(false);
+    setShowSearchPanel(false);
+    setShowNeteasePanel(false);
+    setShowPlaylistPanel(false);
+    setShowMetingPanel(true);
+    setIsMobileSideNavOpen(false);
+  };
+
+  const loadMetingCloudSongs = async (id: string, server: MetingServer) => {
+    if (!id.trim()) return;
+    setIsLoadingNeteaseCloud(true);
+    setNeteaseCloudStatus('正在通过 Meting 接口加载歌单…');
+    try {
+      const songs = await getMetingPlaylist(id.trim(), server);
+      setNeteaseCloudSongs(songs);
+      setNeteaseCloudStatus(songs.length ? '' : '该歌单没有可加载的歌曲。');
+    } catch (error) {
+      console.warn('Meting playlist failed:', error);
+      setNeteaseCloudStatus(`Meting 歌单加载失败：${(error as Error)?.message || '请检查接口地址'}`);
+    } finally {
+      setIsLoadingNeteaseCloud(false);
+    }
   };
 
   const openPlaylistPanel = () => {
     setShowOptionsPanel(false);
-    setShowAudioInputPanel(false);
     setShowSearchPanel(false);
     setShowNeteasePanel(false);
     setShowPlaylistPanel(true);
     setIsMobileSideNavOpen(false);
   };
 
-  const openAudioInputPanel = () => {
-    setShowOptionsPanel(false);
-    setShowSearchPanel(false);
-    setShowNeteasePanel(false);
-    setShowPlaylistPanel(false);
-    setShowAudioInputPanel(true);
-    setIsMobileSideNavOpen(false);
-  };
 
   useEffect(() => {
     writeDisplaySettingsStorage(displaySettings);
@@ -570,164 +586,6 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
       console.warn('Unable to save playlists to local server:', error);
     });
   }, [playlists]);
-
-  const syncNeteaseCookie = async (cookie: string, options: { silent?: boolean } = {}) => {
-    const normalizedCookie = cookie.trim();
-    if (normalizedCookie && !options.silent) {
-      setCookieStatus(t('ui.text.5', lang));
-    }
-
-    setIsSyncingNeteaseCookie(true);
-    try {
-      const { data } = await syncNeteaseProxyCookie(cookie);
-      const valid = Boolean(data.valid);
-      setIsNeteaseCookieValid(valid);
-      if (!options.silent) {
-        setCookieStatus(normalizedCookie ? (valid ? t('ui.text.6', lang) : t('ui.text.7', lang)) : t('ui.text.8', lang));
-      }
-      if (normalizedCookie && !valid) {
-        syncNeteaseProxyCookie('').catch((error) => {
-          console.warn('Unable to clear invalid Netease proxy cookie:', error);
-        });
-      }
-      return valid;
-    } catch (error) {
-      console.warn('Unable to sync Netease cookie:', error);
-      if (!options.silent) {
-        setIsNeteaseCookieValid(false);
-      }
-      if (!options.silent) {
-        setCookieStatus(t('ui.text.9', lang));
-      }
-      return options.silent && isNeteaseCookieValid;
-    } finally {
-      setIsSyncingNeteaseCookie(false);
-    }
-  };
-
-  const syncQQCookie = async (cookie: string, options: { silent?: boolean } = {}) => {
-    const normalizedCookie = cookie.trim();
-    if (normalizedCookie && !options.silent) setQQCookieStatus(t('ui.text.10', lang));
-
-    setIsSyncingQQCookie(true);
-    try {
-      const { ok, data } = await syncQQProxyCookie(cookie);
-      const valid = ok && Boolean(data.loggedIn);
-      setIsQQCookieValid(valid);
-      if (!options.silent) {
-        setQQCookieStatus(normalizedCookie ? (valid ? t('ui.text.11', lang) : t('ui.text.12', lang)) : t('ui.text.13', lang));
-      }
-      return valid;
-    } catch (error) {
-      console.warn('Unable to sync QQ cookie:', error);
-      if (!options.silent) {
-        setIsQQCookieValid(false);
-        setQQCookieStatus(t('ui.text.14', lang));
-      }
-      return options.silent && isQQCookieValid;
-    } finally {
-      setIsSyncingQQCookie(false);
-    }
-  };
-
-  useEffect(() => {
-    const savedCookie = readNeteaseCookieStorage();
-    if (savedCookie) {
-      setNeteaseCookie(savedCookie);
-      syncNeteaseCookie(savedCookie);
-    }
-
-    const savedQQCookie = readQQCookieStorage();
-    if (savedQQCookie) {
-      setQQCookie(savedQQCookie);
-      syncQQCookie(savedQQCookie);
-    }
-  }, []);
-
-
-  const saveNeteaseCookie = () => {
-    writeNeteaseCookieStorage(neteaseCookie);
-    const normalizedCookie = readNeteaseCookieStorage();
-    setNeteaseCookie(normalizedCookie);
-    syncNeteaseCookie(normalizedCookie);
-  };
-
-  const clearNeteaseCookie = async () => {
-    writeNeteaseCookieStorage('');
-    setNeteaseCookie('');
-    setIsNeteaseCookieValid(false);
-    syncNeteaseCookie('');
-    if (window.sonicDesktop?.isDesktop) {
-      await window.sonicDesktop.clearNeteaseLogin().catch((error) => {
-        console.warn('Unable to clear Netease desktop session:', error);
-      });
-    }
-  };
-
-  const saveQQCookie = () => {
-    writeQQCookieStorage(qqCookie);
-    const normalizedCookie = readQQCookieStorage();
-    setQQCookie(normalizedCookie);
-    syncQQCookie(normalizedCookie);
-  };
-
-  const clearQQCookie = async () => {
-    writeQQCookieStorage('');
-    setQQCookie('');
-    setIsQQCookieValid(false);
-    setQQCookieStatus(t('ui.text.15', lang));
-    await logoutQQProxy().catch((error) => {
-      console.warn('Unable to clear QQ proxy cookie:', error);
-    });
-    if (window.sonicDesktop?.isDesktop) {
-      await window.sonicDesktop.clearQQLogin().catch((error) => {
-        console.warn('Unable to clear QQ desktop session:', error);
-      });
-    }
-  };
-
-  const startDesktopNeteaseLogin = async () => {
-    if (!window.sonicDesktop?.isDesktop) return;
-    setDesktopLoginStatus(t('ui.text.16', lang));
-    try {
-      const result = await window.sonicDesktop.openNeteaseLogin();
-      if (!result?.ok || !result.cookie) {
-        setDesktopLoginStatus(result?.message || result?.error || t('ui.text.17', lang));
-        return;
-      }
-      writeNeteaseCookieStorage(result.cookie);
-      const normalizedCookie = readNeteaseCookieStorage();
-      setNeteaseCookie(normalizedCookie);
-      const valid = await syncNeteaseCookie(normalizedCookie);
-      setDesktopLoginStatus(valid ? t('ui.text.18', lang) : t('ui.text.19', lang));
-    } catch (error) {
-      console.warn('Unable to open Netease desktop login:', error);
-      setDesktopLoginStatus(t('ui.text.20', lang));
-    }
-  };
-
-  const startDesktopQQLogin = async () => {
-    if (!window.sonicDesktop?.isDesktop) return;
-    setDesktopLoginStatus(t('ui.text.21', lang));
-    try {
-      const result = await window.sonicDesktop.openQQLogin();
-      if (!result?.ok || !result.cookie) {
-        setDesktopLoginStatus(result?.message || result?.error || t('ui.text.22', lang));
-        return;
-      }
-      writeQQCookieStorage(result.cookie);
-      const normalizedCookie = readQQCookieStorage();
-      setQQCookie(normalizedCookie);
-      const valid = await syncQQCookie(normalizedCookie);
-      const state = getQQCookieLoginState(normalizedCookie);
-      setDesktopLoginStatus(valid
-        ? (state.playbackKeyReady ? t('ui.text.23', lang) : t('ui.text.24', lang))
-        : t('ui.text.25', lang));
-    } catch (error) {
-      console.warn('Unable to open QQ desktop login:', error);
-      setDesktopLoginStatus(t('ui.text.26', lang));
-    }
-  };
 
   const syncImportedPlaylists = (nextPlaylists: SavedPlaylist[]) => {
     saveServerPlaylists(nextPlaylists).catch((error) => {
@@ -750,189 +608,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     setActivePlaylistId(data.playlists[0]?.id || 'favorites');
     syncImportedPlaylists(data.playlists);
 
-    const importedCookie = data.neteaseCookie || '';
-    setNeteaseCookie(importedCookie);
-    if (importedCookie) {
-      await syncNeteaseCookie(importedCookie);
-    } else {
-      setIsNeteaseCookieValid(false);
-      await syncNeteaseCookie('', { silent: true });
-    }
-
     setPresetTransferStatus(t('ui.text.38', lang));
-  };
-
-  const ensureCloudCookieReady = async (provider: CloudProvider = cloudProvider) => {
-    const label = provider === 'qq' ? t('ui.text.39', lang) : t('ui.text.40', lang);
-    const savedCookie = provider === 'qq' ? readQQCookieStorage() : readNeteaseCookieStorage();
-    if (!savedCookie.trim()) {
-      if (provider === 'qq') setIsQQCookieValid(false);
-      else setIsNeteaseCookieValid(false);
-      setNeteaseCloudStatus(`请先在设置里登录可用的${label}账号`);
-      openOptionsPanel();
-      return '';
-    }
-
-    if (provider === 'qq') setQQCookie(savedCookie);
-    else setNeteaseCookie(savedCookie);
-    const valid = provider === 'qq'
-      ? await syncQQCookie(savedCookie, { silent: isQQCookieValid })
-      : await syncNeteaseCookie(savedCookie, { silent: isNeteaseCookieValid });
-    if (!valid) {
-      setNeteaseCloudStatus(`${label}账号需要重新登录`);
-      openOptionsPanel();
-      return '';
-    }
-
-    return savedCookie;
-  };
-
-  const fetchNeteaseSongs = async (url: string, emptyMessage: string, provider: CloudProvider = cloudProvider) => {
-    const readyCookie = await ensureCloudCookieReady(provider);
-    if (!readyCookie) return;
-    const label = provider === 'qq' ? t('ui.text.41', lang) : t('ui.text.42', lang);
-
-    setIsLoadingNeteaseCloud(true);
-    setNeteaseCloudStatus(t('ui.text.43', lang));
-
-    try {
-      const { ok, status, data } = await loadCloudPayload(url, provider, readyCookie);
-
-      if (!ok) {
-        if (status === 401) {
-          if (provider === 'qq') setIsQQCookieValid(false);
-          else setIsNeteaseCookieValid(false);
-          setNeteaseCloudStatus(`${label}账号失效了，请重新登录`);
-          openOptionsPanel();
-        } else {
-          setNeteaseCloudStatus(`${label}接口临时失败，请稍后再试`);
-        }
-        return;
-      }
-
-      const songs = Array.isArray(data.songs) ? data.songs : [];
-      if (songs.length === 0) {
-        setNeteaseCloudSongs([]);
-        setNeteaseCloudStatus(emptyMessage);
-        return;
-      }
-
-      setNeteaseCloudSongs(songs.map((song: NeteaseSong) => ({ ...song, provider: song.provider || provider })));
-      if (typeof data.status === 'string') {
-        setNeteaseCloudStatus(data.status);
-      } else if (data.fallback) {
-        setNeteaseCloudStatus(t('ui.text.44', lang));
-      } else if (data.playlist || typeof data.loadedCount === 'number') {
-        const totalCount = Number(data.totalCount || data.playlist?.trackCount || data.rawTrackCount || 0);
-        setNeteaseCloudStatus(totalCount > 0 ? `已加载 ${songs.length} / ${totalCount} 首` : `已加载 ${songs.length} 首`);
-      } else {
-        setNeteaseCloudStatus('');
-      }
-    } catch (error) {
-      console.warn('Unable to load cloud songs:', error);
-      setNeteaseCloudStatus(t('ui.text.45', lang));
-    } finally {
-      setIsLoadingNeteaseCloud(false);
-    }
-  };
-
-  const loadDailyRecommendations = async () => {
-    const provider: CloudProvider = 'netease';
-    setCloudProvider(provider);
-    setNeteaseCloudTab('daily');
-    setActiveNeteasePlaylistId(null);
-    await fetchNeteaseSongs('/api/netease/daily-recommend?limit=50', t('ui.text.46', lang), provider);
-  };
-
-  const loadLikedSongs = async (provider: CloudProvider = cloudProvider) => {
-    setCloudProvider(provider);
-    setNeteaseCloudTab('liked');
-    setActiveNeteasePlaylistId(null);
-    if (provider === 'netease') {
-      await fetchNeteaseSongs('/api/netease/liked?limit=all', t('ui.text.47', lang), provider);
-      return;
-    }
-    const readyCookie = await ensureCloudCookieReady('qq');
-    if (!readyCookie) return;
-    setIsLoadingNeteaseCloud(true);
-    setNeteaseCloudStatus(t('ui.text.48', lang));
-    try {
-      const { ok, data } = await loadCloudPayload('/api/qq/user/playlists', 'qq', readyCookie);
-      if (!ok) {
-        setIsQQCookieValid(false);
-        setNeteaseCloudStatus(t('ui.text.49', lang));
-        openOptionsPanel();
-        return;
-      }
-      const playlists = Array.isArray(data.playlists) ? data.playlists : [];
-      setNeteaseCloudPlaylists(playlists);
-      const favorite = playlists.find((playlist: NeteasePlaylistSummary) => playlist.isFavorite) || playlists[0];
-      if (!favorite) {
-        setNeteaseCloudSongs([]);
-        setNeteaseCloudStatus(t('ui.text.50', lang));
-        return;
-      }
-      setActiveNeteasePlaylistId(favorite.id);
-      await fetchNeteaseSongs(`/api/qq/playlist/tracks?id=${encodeURIComponent(String(favorite.id))}&limit=all`, t('ui.text.51', lang), provider);
-    } catch (error) {
-      console.warn('Unable to load QQ liked songs:', error);
-      setNeteaseCloudStatus(t('ui.text.52', lang));
-    } finally {
-      setIsLoadingNeteaseCloud(false);
-    }
-  };
-
-  const loadNeteasePlaylists = async (provider: CloudProvider = cloudProvider) => {
-    setCloudProvider(provider);
-    setNeteaseCloudTab('playlists');
-    setNeteaseCloudSongs([]);
-    setActiveNeteasePlaylistId(null);
-    const readyCookie = await ensureCloudCookieReady(provider);
-    if (!readyCookie) return;
-    const label = provider === 'qq' ? t('ui.text.53', lang) : t('ui.text.54', lang);
-
-    setIsLoadingNeteaseCloud(true);
-    setNeteaseCloudStatus(t('ui.text.55', lang));
-
-    try {
-      const { ok, status, data } = await loadCloudPayload(
-        provider === 'qq' ? '/api/qq/user/playlists' : '/api/netease/playlists',
-        provider,
-        readyCookie,
-      );
-
-      if (!ok) {
-        if (status === 401) {
-          if (provider === 'qq') setIsQQCookieValid(false);
-          else setIsNeteaseCookieValid(false);
-          setNeteaseCloudStatus(`${label}账号失效了，请重新登录`);
-          openOptionsPanel();
-        } else {
-          setNeteaseCloudStatus(`${label}接口临时失败，请稍后再试`);
-        }
-        return;
-      }
-
-      const cloudPlaylists = (Array.isArray(data.playlists) ? data.playlists : [])
-        .filter((playlist: NeteasePlaylistSummary) => provider !== 'qq' || !playlist.isFavorite);
-      setNeteaseCloudPlaylists(cloudPlaylists);
-      setNeteaseCloudStatus(cloudPlaylists.length ? t('ui.text.56', lang) : `没有找到${label}歌单`);
-    } catch (error) {
-      console.warn('Unable to load cloud playlists:', error);
-      setNeteaseCloudStatus(t('ui.text.57', lang));
-    } finally {
-      setIsLoadingNeteaseCloud(false);
-    }
-  };
-
-  const loadNeteasePlaylistSongs = async (playlist: NeteasePlaylistSummary) => {
-    const provider = playlist.provider || cloudProvider;
-    setCloudProvider(provider);
-    setActiveNeteasePlaylistId(playlist.id);
-    const url = provider === 'qq'
-      ? `/api/qq/playlist/tracks?id=${encodeURIComponent(String(playlist.id))}&limit=all`
-      : `/api/netease/playlist?id=${encodeURIComponent(String(playlist.id))}&limit=all`;
-    await fetchNeteaseSongs(url, t('ui.text.58', lang), provider);
   };
 
   useEffect(() => {
@@ -959,31 +635,6 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     loadPlaylists();
   }, []);
 
-  useEffect(() => {
-    if (isRightSidebarOpen) {
-      if (isNeteaseCookieValid && fetchedNeteasePlaylists.length === 0) {
-        ensureCloudCookieReady('netease').then(cookie => {
-          if (!cookie) return;
-          loadCloudPayload('/api/netease/playlists', 'netease', cookie)
-            .then(({ data }) => {
-               if (data.playlists) setFetchedNeteasePlaylists(data.playlists);
-            }).catch(() => {});
-        });
-      }
-      if (isQQCookieValid && fetchedQQPlaylists.length === 0) {
-        ensureCloudCookieReady('qq').then(cookie => {
-          if (!cookie) return;
-          loadCloudPayload('/api/qq/user/playlists', 'qq', cookie)
-            .then(({ data }) => {
-               if (data.playlists) {
-                 setFetchedQQPlaylists(data.playlists.filter((p: NeteasePlaylistSummary) => !p.isFavorite));
-               }
-            }).catch(() => {});
-        });
-      }
-    }
-  }, [isRightSidebarOpen, isNeteaseCookieValid, isQQCookieValid, fetchedNeteasePlaylists.length, fetchedQQPlaylists.length]);
-  
   // Audio state poller
   useEffect(() => {
     const initEngine = async () => {
@@ -1048,8 +699,6 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     }
 
     if (audioFile) {
-        setAudioInputMode('player');
-        setAudioInputStatus('');
         setLyricsText('');
         const metadata = await extractAudioMetadata(audioFile, audioFile.name);
         if (metadata.lyrics) {
@@ -1102,8 +751,6 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
 
       const audioBlob = await audioResponse.blob();
       const metadata = await extractAudioMetadata(audioBlob, audioName);
-      setAudioInputMode('player');
-      setAudioInputStatus('');
       setTrackName(metadata.displayName);
       setCurrentCover(metadata.cover || '');
 
@@ -1130,10 +777,6 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
   };
 
   const togglePlay = () => {
-    if (audioInputMode !== 'player') {
-      returnToPlayerInput();
-      return;
-    }
     engine.init();
     engine.togglePlay();
   };
@@ -1141,46 +784,28 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
   const searchNetease = async () => {
     const keywords = searchQuery.trim();
     if (!keywords) return;
-    const provider = effectiveSearchProvider;
-    const requestCookie = provider === 'netease' && isNeteaseCookieValid ? neteaseCookie : '';
-    const requestQQCookie = provider === 'qq' && isQQCookieValid ? qqCookie : '';
 
     setIsSearching(true);
-    setSearchStatus(`正在搜索${provider === 'qq' ? t('ui.text.59', lang) : t('ui.text.60', lang)}可播放歌曲...`);
     setSearchResults([]);
-
+    setSearchStatus('正在通过 Meting 接口搜索…');
     try {
-      const { ok, data } = await searchCloudMusic(
-        provider,
-        keywords,
-        provider === 'qq' ? requestQQCookie : requestCookie,
-      );
-      if (!ok) throw new Error(`${provider} search request failed`);
-
-      const songs = (Array.isArray(data.songs) ? data.songs : [])
-        .map((song: NeteaseSong) => ({ ...song, provider }));
-      const rawCount = Number(data.rawCount || songs.length || 0);
+      const base = await resolveMetingBase();
+      if (!base) {
+        setSearchStatus('未配置 Meting 接口地址，请在「设置 → 账号登录 → Meting 接口」中填写。');
+        return;
+      }
+      const songs = await searchMeting(keywords, getMetingServer());
       setSearchResults(songs);
-      setSearchStatus(songs.length ? '' : (rawCount > 0
-        ? (provider === 'netease' && !requestCookie
-          ? `搜到 ${rawCount} 首，但未登录只能显示可播放歌曲；保存网易云 Cookie 后可能会显示更多。`
-          : `搜到 ${rawCount} 首，但当前账号没有可播放版本，可能受版权、会员或地区限制。`)
-        : (provider === 'qq'
-          ? t('ui.text.61', lang)
-          : (requestCookie
-            ? `搜到 ${rawCount} 首，但当前账号没有可播放版本，可能受版权、会员或地区限制。`
-            : t('ui.text.62', lang)))));
+      setSearchStatus(songs.length ? '' : 'Meting 未返回结果，可能是音源不支持或接口地址有误。');
     } catch (error) {
-      console.warn('Music search failed:', error);
-      setSearchStatus(t('ui.text.63', lang));
+      console.warn('Meting search failed:', error);
+      setSearchStatus(`Meting 搜索失败：${(error as Error)?.message || '请检查接口地址'}`);
     } finally {
       setIsSearching(false);
     }
   };
 
   const loadNeteaseSong = async (song: NeteaseSong, queue?: NeteaseSong[]) => {
-    setAudioInputMode('player');
-    setAudioInputStatus('');
     if (queue) setPlayQueue(queue);
     setCurrentSongId(songIdentity(song));
     setCurrentSong(song);
@@ -1188,57 +813,43 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     setTrackName(`${song.artist ? `${song.artist} - ` : ''}${song.name}`);
     setLyricsText('');
     setSearchStatus(t('ui.text.64', lang));
-    const provider = song.provider || 'netease';
-    const requestCookie = provider === 'netease' && isNeteaseCookieValid ? neteaseCookie : '';
-    const requestQQCookie = provider === 'qq' && isQQCookieValid ? qqCookie : '';
-    
+
+    // 封面预热：播放哪首就缓存它【周围】的歌（当前歌前 1 首 + 后 3 首，共 4 首）。
+    // 在歌单里任意跳转都能让邻曲封面提前进边缘缓存、秒出；其余歌曲靠边缘缓存按需命中，
+    // 不一次性全量预热（避免请求数飙升）。warmCoverCache 内部已去重 + 限并发 4。
+    const warmQueue = queue && queue.length ? queue : getCurrentQueue();
+    if (warmQueue.length) {
+      const idx = warmQueue.findIndex((s) => songIdentity(s) === songIdentity(song));
+      if (idx >= 0) {
+        const start = Math.max(0, idx - 1);
+        warmCoverCache(warmQueue.slice(start, start + 4).map((s) => s.cover));
+      }
+    }
+
     // persist last played
     writeLastPlayedStorage({ type: 'cloud', song, trackName: `${song.artist ? `${song.artist} - ` : ''}${song.name}`, cover: song.cover || '', queue: queue || playQueue });
 
+    // 网页版线上音源统一走 Meting（QQ 音乐 / tencent），不再有网易云 / QQ 直接反代分支。
+    const server = (song.metingServer as MetingServer) || getMetingServer();
+    setSearchStatus('正在通过 Meting 接口获取播放链接…');
     try {
-      if (provider === 'qq') {
-        const mid = song.mid || song.songmid || String(song.id);
-        const mediaMid = song.mediaMid || '';
-        const qqSong = { mid, mediaMid };
-        const { urlData, lyricData } = await loadSongPlaybackResources(
-          song, playbackQualitySettings, requestCookie, requestQQCookie,
-        );
-        setLyricsText(lyricData.lyric || lyricData.tlyric || lyricData.qrc || '');
-
-        if (!urlData.url) {
-          setSearchStatus(urlData.message || t('ui.text.65', lang));
-          playFromQueue(1, songIdentity(song));
-          return;
-        }
-
-        engine.init();
-        engine.loadUrl(buildQQPlaybackUrl('/api/qq/audio', qqSong, playbackQualitySettings));
-        engine.play();
-        setSearchStatus('');
-        setShowSearchPanel(false);
-        return;
-      }
-
-      const { urlData, lyricData } = await loadSongPlaybackResources(
-        song, playbackQualitySettings, requestCookie, requestQQCookie,
-      );
-      const lyric = lyricData.lyric || lyricData.translatedLyric || '';
-      setLyricsText(lyric);
-
-      if (!urlData.url) {
-        setSearchStatus(t('ui.text.66', lang));
+      let playUrl = song.url || '';
+      if (!playUrl) playUrl = await getMetingSongUrl(song.id, server);
+      if (!playUrl) {
+        setSearchStatus('Meting 未返回可用播放链接。');
         playFromQueue(1, songIdentity(song));
         return;
       }
-
+      const lyric = await getMetingLyric(song.lyric || String(song.id), server);
+      setLyricsText(lyric.lyric || lyric.translatedLyric || song.lyric || '');
       engine.init();
-      engine.loadUrl(buildNeteasePlaybackUrl('/api/netease/audio', song.id, playbackQualitySettings));
+      engine.loadUrl(playUrl);
       engine.play();
       setSearchStatus('');
       setShowSearchPanel(false);
-    } catch (error) {
-      console.warn('Unable to load song:', error);
-      setSearchStatus(t('ui.text.67', lang));
+    } catch (err) {
+      console.warn('Meting playback failed:', err);
+      setSearchStatus(`Meting 播放失败：${(err as Error)?.message || ''}`);
       playFromQueue(1, songIdentity(song));
     }
   };
@@ -1264,20 +875,53 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     loadNeteaseSong(queue[nextIndex], queue);
   };
 
-  const restoreLastPlayedLyrics = async (
-    song: NeteaseSong,
-    provider: CloudProvider,
-    requestCookie: string,
-    requestQQCookie: string,
-  ) => {
-    try {
-      const { data: lyricData } = await loadSongLyrics(song, requestCookie, requestQQCookie);
-      setLyricsText(lyricData.lyric || lyricData.translatedLyric || lyricData.tlyric || lyricData.qrc || '');
-    } catch (error) {
-      console.warn('Unable to restore last played lyrics:', error);
-      setLyricsText('');
-    }
-  };
+  // 网页版启动时自动加载默认 Meting 歌单（QQ 音乐）并播放第一首。
+  // 仅依赖自建 Meting 后端，不涉及账号 / 代理 / Cookie。
+  // 启动配置来源（优先级）：网页内 localStorage 覆盖 → public/site-config.json5 部署默认 → 代码内置默认。
+  // 站点配置在启动时 loadSiteConfig() 一次拉取，下面的读取均走 getSiteConfig()。
+  const defaultPlaylistLoadedRef = useRef(false);
+  useEffect(() => {
+    if (defaultPlaylistLoadedRef.current) return;
+    defaultPlaylistLoadedRef.current = true;
+    let cancelled = false;
+    (async () => {
+      try {
+        await loadSiteConfig();
+        if (cancelled) return;
+        const server = getMetingServer();
+        const siteIds = getSiteConfig()?.defaultPlaylistIds || [];
+        const playlistIds = siteIds.length ? siteIds : DEFAULT_METING_PLAYLIST_IDS;
+        // 逐一加载所有默认歌单；第一个歌单的歌曲作为启动时的播放队列与面板内容。
+        for (let i = 0; i < playlistIds.length; i++) {
+          if (cancelled) return;
+          const playlistId = playlistIds[i];
+          const songs = await getMetingPlaylist(playlistId, server);
+          if (cancelled) return;
+          if (songs.length > 0) {
+            if (i === 0) {
+              setNeteaseCloudSongs(songs);
+              setNeteaseCloudStatus('');
+            }
+            // 把每份默认歌单都落到本地「歌单」列表（SavedPlaylist），按 id 去重，仅首次补入。
+            const savedId = `meting-${playlistId}`;
+            setPlaylists((current) => {
+              if (current.some((p) => p.id === savedId)) return current;
+              return [...current, { id: savedId, name: `Meting 歌单 ${playlistId}`, songs }];
+            });
+            // 仅第一个歌单自动播放第一首（Meting provider 走 loadNeteaseSong 的 meting 分支）。
+            if (i === 0) loadNeteaseSong(songs[0], songs);
+          } else {
+            console.warn('默认歌单未返回歌曲:', playlistId);
+          }
+        }
+      } catch (error) {
+        if (cancelled) return;
+        console.warn('自动加载默认歌单失败:', error);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     engine.audioElement.loop = isRepeatOneMode(playMode);
@@ -1296,35 +940,20 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     return () => engine.audioElement.removeEventListener('ended', handleEnded);
   }, [playQueue, currentSongId, playMode, activePlaylistId, playlists]);
 
-  // ── Restore last played cloud song on startup ──────────────────
+  // 打开歌单 / 切换歌单时，自动把当前正在播放的歌滚动到可视区域（block: nearest 仅在不临界时移动，不打扰浏览）
   useEffect(() => {
-    const last = readLastPlayedStorage();
-    if (!last || last.type !== 'cloud' || !last.song) return;
-    const song = last.song;
-    // Restore UI state only (no autoplay — user clicks play to resume)
-    setCurrentSong(song);
-    if (last.queue && last.queue.length > 0) {
-      setPlayQueue(last.queue);
+    if (!currentSongId) return;
+    const id = String(currentSongId);
+    const sel = `[data-song-id="${CSS.escape(id)}"]`;
+    if (showPlaylistPanel && playlistPanelScrollRef.current) {
+      const el = playlistPanelScrollRef.current.querySelector(sel);
+      if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
-    setCurrentSongId(songIdentity(song));
-    setTrackName(last.trackName);
-    setCurrentCover(last.cover || song.cover || '');
-    // Pre-load the audio URL silently so the player bar shows the track
-    const provider = song.provider || 'netease';
-    const requestCookie = provider === 'netease' && isNeteaseCookieValid ? neteaseCookie : '';
-    const requestQQCookie = provider === 'qq' && isQQCookieValid ? qqCookie : '';
-    restoreLastPlayedLyrics(song, provider, requestCookie, requestQQCookie);
-    if (provider === 'qq') {
-      const mid = song.mid || song.songmid || String(song.id);
-      const mediaMid = song.mediaMid || '';
-      engine.init();
-      engine.loadUrl(buildQQPlaybackUrl('/api/qq/audio', { mid, mediaMid }, playbackQualitySettings));
-    } else {
-      engine.init();
-      engine.loadUrl(buildNeteasePlaybackUrl('/api/netease/audio', song.id, playbackQualitySettings));
+    if (rightTracksScrollRef.current) {
+      const el = rightTracksScrollRef.current.querySelector(sel);
+      if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
-    // Do NOT call engine.play() — leave paused for user to resume
-  }, []); // run once on mount
+  }, [showPlaylistPanel, activePlaylistId, activeRightSidebarSelection, mobileRightView, currentSongId, isMobile]);
 
   const addSongToPlaylist = (playlistId: string, song: NeteaseSong) => {
     setPlaylists((current) => current.map((playlist) => {
@@ -1349,6 +978,18 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     setNeteaseCloudStatus(t('ui.text.69', lang));
   };
 
+  // 把整份 Meting 搜索结果/歌单一次性并入指定本地歌单（按 songIdentity 去重）。
+  const addSongsToPlaylist = (playlistId: string, songs: NeteaseSong[]) => {
+    setPlaylists((current) => current.map((playlist) => {
+      if (playlist.id !== playlistId) return playlist;
+      const existing = new Set(playlist.songs.map((s) => songIdentity(s)));
+      const additions = songs.filter((song) => !existing.has(songIdentity(song)));
+      return { ...playlist, songs: [...playlist.songs, ...additions] };
+    }));
+    const playlistName = playlists.find((playlist) => playlist.id === playlistId)?.name || 'playlist';
+    setSearchStatus(`已加入 ${songs.length} 首到 ${playlistName}`);
+  };
+
   const createPlaylistAndAddSong = () => {
     const name = newPlaylistName.trim();
     if (!name || !songToAdd) return;
@@ -1358,6 +999,18 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     setActivePlaylistId(id);
     setSearchStatus(`已加入 ${name}`);
     setSongToAdd(null);
+    setNewPlaylistName('');
+  };
+
+  const createPlaylistFromAllSongs = () => {
+    const name = newPlaylistName.trim();
+    if (!name || !songsToAddAll || songsToAddAll.length === 0) return;
+
+    const id = `playlist-${Date.now()}`;
+    setPlaylists((current) => [...current, { id, name, songs: songsToAddAll }]);
+    setActivePlaylistId(id);
+    setSearchStatus(`已加入 ${songsToAddAll.length} 首到 ${name}`);
+    setSongsToAddAll(null);
     setNewPlaylistName('');
   };
 
@@ -1527,8 +1180,6 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
 
   return (
     <>
-      {showSplash && <SplashScreen onComplete={handleSplashComplete} surfaceColor={surfaceHex} accentColor={accentHex} />}
-
       {isPerspectiveEditMode && (
         <div className="absolute top-8 left-1/2 -translate-x-1/2 z-[100] flex flex-col items-center gap-3">
           <div className="bg-black/60 backdrop-blur-md px-6 py-3 rounded-full border border-white/10 text-white font-medium text-sm tracking-widest shadow-2xl animate-in fade-in slide-in-from-top-4 pointer-events-auto">
@@ -1587,90 +1238,80 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
       
       {/* Sidebar Left */}
       <div
-        className={`side-nav-trigger absolute left-0 top-0 h-full z-[60] transition-all pointer-events-auto ${isMobileSideNavOpen ? 'is-mobile-open' : ''}`}
+        className={`side-nav-trigger absolute left-0 top-0 h-full z-[60] transition-all ${isMobile ? 'pointer-events-none' : 'pointer-events-auto'} ${isMobileSideNavOpen ? 'is-mobile-open' : ''}`}
         onMouseEnter={(e) => {
+          if (isMobile) return;
           // Do not open side nav if user is dragging (holding mouse button)
           if (e.buttons !== 0) return;
           // Do not open if user just released the mouse (e.g., just finished dragging the scene)
           if (Date.now() - lastPointerUpTime.current < 100) return;
           openMobileSideNav();
         }}
-        onMouseLeave={() => setIsMobileSideNavOpen(false)}
+        onMouseLeave={() => {
+          if (isMobile) return;
+          setIsMobileSideNavOpen(false);
+        }}
       >
         <aside
-          className={`side-nav-panel absolute left-0 top-0 h-full border-r flex flex-col pointer-events-auto ${isMobileSideNavOpen ? 'translate-x-0' : '-translate-x-full'} transition-transform duration-300`}
+          className={`side-nav-panel absolute left-0 top-0 h-full border-r flex flex-col pointer-events-auto ${isMobileSideNavOpen ? 'translate-x-0' : '-translate-x-full'} transition-transform duration-300 ${isMobile ? 'justify-start gap-6 overflow-y-auto' : ''}`}
           style={{
             ...themedPanelStyle(accentHex, isLightSurface ? 0.82 : 0.7),
             borderRightColor: colorWithAlpha(accentHex, isLightSurface ? 0.26 : 0.18),
             boxShadow: `16px 0 50px rgba(0,0,0,${isLightSurface ? 0.18 : 0.2}), inset -1px 0 0 ${colorWithAlpha(accentHex, isLightSurface ? 0.14 : 0.08)}`,
           }}
         >
-          <button onClick={closeFloatingPanels} className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-100 transition-opacity cursor-pointer" style={{ writingMode: 'vertical-rl', color: sideNavActiveColor }}>{t('nav.visualize', lang)}</button>
-          <button onClick={openOptionsPanel} className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer flex items-center justify-center gap-2" style={{ writingMode: 'vertical-rl' }}>
+          <button onClick={closeFloatingPanels} className={`uppercase tracking-[0.2em] text-[10px] ${isMobile ? '' : 'mb-12'} opacity-100 transition-opacity cursor-pointer`} style={{ writingMode: isMobile ? 'horizontal-tb' : 'vertical-rl', color: sideNavActiveColor }}>{t('nav.visualize', lang)}</button>
+          <button onClick={openOptionsPanel} className={`uppercase tracking-[0.2em] text-[10px] ${isMobile ? '' : 'mb-12'} opacity-40 hover:opacity-100 transition-opacity cursor-pointer`} style={{ writingMode: isMobile ? 'horizontal-tb' : 'vertical-rl' }}>
             {t('nav.settings', lang)}
           </button>
-          <button onClick={openSearchPanel} className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer flex items-center justify-center gap-2" style={{ writingMode: 'vertical-rl' }}>
+          <button onClick={openSearchPanel} className={`uppercase tracking-[0.2em] text-[10px] ${isMobile ? '' : 'mb-12'} opacity-40 hover:opacity-100 transition-opacity cursor-pointer`} style={{ writingMode: isMobile ? 'horizontal-tb' : 'vertical-rl' }}>
             {t('nav.search', lang)}
           </button>
-          {isNeteaseCookieValid && (
-            <button
-              onClick={() => openCloudPanelDefault('netease')}
-              className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer flex items-center justify-center gap-2"
-              style={{ writingMode: 'vertical-rl' }}
-            >
-              {t('nav.netease', lang)}
-            </button>
-          )}
-          {isQQCookieValid && (
-            <button
-              onClick={() => openCloudPanelDefault('qq')}
-              className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer flex items-center justify-center gap-2"
-              style={{ writingMode: 'vertical-rl' }}
-            >
-              {t('nav.qqmusic', lang)}
-            </button>
-          )}
-          <button onClick={openPlaylistPanel} className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer flex items-center justify-center gap-2" style={{ writingMode: 'vertical-rl' }}>
+          <button
+            onClick={openMetingPanel}
+            className={`uppercase tracking-[0.2em] text-[10px] ${isMobile ? '' : 'mb-12'} opacity-40 hover:opacity-100 transition-opacity cursor-pointer`}
+            style={{ writingMode: isMobile ? 'horizontal-tb' : 'vertical-rl' }}
+          >
+            Meting
+          </button>
+          <button onClick={openPlaylistPanel} className={`uppercase tracking-[0.2em] text-[10px] ${isMobile ? '' : 'mb-12'} opacity-40 hover:opacity-100 transition-opacity cursor-pointer`} style={{ writingMode: isMobile ? 'horizontal-tb' : 'vertical-rl' }}>
             {t('nav.playlist', lang)}
           </button>
-          <button onClick={openAudioInputPanel} className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer flex items-center justify-center gap-2" style={{ writingMode: 'vertical-rl' }}>
-            {t('nav.input', lang)}
-          </button>
 
-          <div className="side-nav-bottom mt-auto flex flex-col items-center gap-10">
+          <div className={`side-nav-bottom ${isMobile ? 'flex flex-col items-center gap-6' : 'mt-auto flex flex-col items-center gap-10'}`}>
             <button 
               onClick={() => { loadDemo(); setIsMobileSideNavOpen(false); }}
               className="uppercase tracking-[0.2em] text-[10px] opacity-40 hover:opacity-100 transition-opacity cursor-pointer font-bold"
-              style={{ writingMode: 'vertical-rl' }}
+              style={{ writingMode: isMobile ? 'horizontal-tb' : 'vertical-rl' }}
             >
               {t('nav.example', lang)}
             </button>
             <button 
               onClick={() => { fileInputRef.current?.click(); setIsMobileSideNavOpen(false); }}
               className="uppercase tracking-[0.2em] text-[10px] opacity-40 hover:opacity-100 transition-opacity cursor-pointer"
-              style={{ writingMode: 'vertical-rl' }}
+              style={{ writingMode: isMobile ? 'horizontal-tb' : 'vertical-rl' }}
             >
               {t('nav.upload', lang)}
             </button>
             <button
               onClick={() => { onPerspectiveEditModeChange?.(true); setIsMobileSideNavOpen(false); }}
               className={`uppercase tracking-[0.2em] text-[10px] transition-opacity cursor-pointer ${isPerspectiveEditMode ? 'opacity-100' : 'opacity-40 hover:opacity-100'}`}
-              style={{ writingMode: 'vertical-rl' }}
+              style={{ writingMode: isMobile ? 'horizontal-tb' : 'vertical-rl' }}
             >
               {t('nav.perspective', lang)}
             </button>
             <button
               onClick={toggleFullscreen}
               className={`uppercase tracking-[0.2em] text-[10px] transition-opacity cursor-pointer ${isFullscreen ? 'opacity-100' : 'opacity-40 hover:opacity-100'}`}
-              style={{ writingMode: 'vertical-rl' }}
+              style={{ writingMode: isMobile ? 'horizontal-tb' : 'vertical-rl' }}
             >
               {isFullscreen ? t('nav.exit_fullscreen', lang) : t('nav.fullscreen', lang)}
             </button>
             
             <button
               onClick={() => setLanguage(lang === 'zh' ? 'en' : 'zh')}
-              className="uppercase tracking-[0.2em] text-[10px] opacity-40 hover:opacity-100 transition-opacity cursor-pointer mt-4 font-bold"
-              style={{ writingMode: 'vertical-rl', color: sideNavActiveColor }}
+              className={`uppercase tracking-[0.2em] text-[10px] opacity-40 hover:opacity-100 transition-opacity cursor-pointer ${isMobile ? '' : 'mt-4'} font-bold`}
+              style={{ writingMode: isMobile ? 'horizontal-tb' : 'vertical-rl', color: sideNavActiveColor }}
             >
               {t('nav.lang_toggle', lang)}
             </button>
@@ -1692,21 +1333,29 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
 
       {/* Sidebar Right */}
       <div
-        className={`side-nav-trigger-right absolute right-0 top-0 h-full z-[60] transition-all pointer-events-auto ${isRightSidebarOpen ? 'is-mobile-open-right' : ''}`}
+        className={`side-nav-trigger-right absolute right-0 top-0 h-full z-[60] transition-all ${isMobile ? 'pointer-events-none' : 'pointer-events-auto'} ${isRightSidebarOpen ? 'is-mobile-open-right' : ''}`}
         onMouseEnter={(e) => {
+          if (isMobile) return;
           if (e.buttons !== 0) return;
           if (Date.now() - lastPointerUpTime.current < 100) return;
           setIsRightSidebarOpen(true);
         }}
-        onMouseLeave={() => setIsRightSidebarOpen(false)}
+        onMouseLeave={() => {
+          if (isMobile) return;
+          setIsRightSidebarOpen(false);
+        }}
       >
-        {displaySettings.showRightIcon && (
+        {(displaySettings.showRightIcon) && !(isMobile && isRightSidebarOpen) && (
           <button
             onClick={() => setIsRightSidebarOpen(!isRightSidebarOpen)}
-            className={`absolute top-[88px] right-[56px] z-50 pointer-events-auto cursor-pointer transition-opacity hover:opacity-100 ${isRightSidebarOpen ? 'opacity-100' : 'opacity-40'}`}
+            className={`sonic-right-toggle absolute z-50 pointer-events-auto cursor-pointer transition-opacity hover:opacity-100 ${
+              isMobile
+                ? 'top-[10px] right-[10px] h-11 w-11 flex items-center justify-center rounded-full border border-white/15 bg-black/30'
+                : 'top-[88px] right-[56px]'
+            } ${isRightSidebarOpen ? 'opacity-100' : 'opacity-60'}`}
             style={{ color: isRightSidebarOpen ? sideNavActiveColor : (isLightSurface ? readableAccent : 'rgba(255, 255, 255, 0.96)') }}
           >
-            <Menu size={24} />
+            <Menu size={22} />
           </button>
         )}
 
@@ -1718,260 +1367,197 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
           boxShadow: `-16px 0 50px rgba(0,0,0,${isLightSurface ? 0.18 : 0.2})`,
         }}
       >
-        <div className="flex h-full w-[540px]">
-           {/* Playlists Column */}
-           <div className="w-[200px] border-r flex flex-col h-full" style={{ borderColor: colorWithAlpha(accentHex, 0.18) }}>
-             <div className="p-5 text-[10px] uppercase tracking-[0.2em] text-white/50 shrink-0">Playlists</div>
-             <div className="flex-1 overflow-y-auto themed-scrollbar pb-5">
-               {/* Local Playlists */}
-               {playlists.length > 0 && (
-                 <div className="mb-4">
-                   <div className="px-5 py-2 text-[10px] uppercase tracking-[0.2em] text-white/50 sticky top-0 z-10 backdrop-blur-md" style={{ backgroundColor: colorWithAlpha(surfaceHex, 0.8) }}>Local</div>
-                   {playlists.map(playlist => (
-                     <button 
-                       key={playlist.id} 
-                       onClick={() => {
-                         setActivePlaylistId(playlist.id);
-                         setActiveRightSidebarSelection({ type: 'local', id: playlist.id });
-                       }}
-                       className={`w-full flex items-center gap-3 px-5 py-3 hover:bg-white/5 transition-colors text-left ${activeRightSidebarSelection.type === 'local' && activeRightSidebarSelection.id === playlist.id ? 'bg-white/5' : ''}`}
-                     >
-                       <div className="w-8 h-8 rounded shrink-0 bg-white/10 flex items-center justify-center overflow-hidden">
-                         {playlist.songs[0]?.cover ? (
-                            <img src={playlist.songs[0].cover} className="w-full h-full object-cover" />
-                         ) : (
+        {/* Close button (mobile & desktop) */}
+        <button
+          onClick={() => setIsRightSidebarOpen(false)}
+          className="sonic-right-close absolute top-[14px] right-[16px] z-[70] pointer-events-auto h-9 w-9 rounded-sm border text-white/60 hover:text-white flex items-center justify-center"
+          style={{ borderColor: colorWithAlpha(accentHex, 0.2), background: colorWithAlpha(accentHex, 0.06) }}
+          aria-label="Close"
+        >
+          <X size={18} />
+        </button>
+
+        {isMobile ? (
+          /* 移动端：两级导航。list = 歌单列表，detail = 选中歌单的歌曲 */
+          <div className="sonic-right-col flex flex-col h-full w-full">
+            {mobileRightView === 'list' ? (
+              <div className="flex-1 overflow-y-auto themed-scrollbar pt-16">
+                <div className="px-5 py-3 text-[11px] uppercase tracking-[0.2em] text-white/50">歌单列表</div>
+                {playlists.length === 0 ? (
+                  <div className="px-5 py-8 text-[12px] text-white/40">暂无歌单</div>
+                ) : (
+                  playlists.map(playlist => (
+                    <button
+                      key={playlist.id}
+                      onClick={() => { setActivePlaylistId(playlist.id); setActiveRightSidebarSelection({ type: 'local', id: playlist.id }); setMobileRightView('detail'); }}
+                      className={`w-full flex items-center gap-3 px-5 py-3 hover:bg-white/5 transition-colors text-left ${activeRightSidebarSelection.type === 'local' && activeRightSidebarSelection.id === playlist.id ? 'bg-white/5' : ''}`}
+                    >
+                      <div className="w-10 h-10 rounded shrink-0 bg-white/10 flex items-center justify-center overflow-hidden">
+                        {playlist.songs[0]?.cover ? (
+                          <img src={playlist.songs[0].cover} className="w-full h-full object-cover" />
+                        ) : (
+                          <ListMusic size={16} className="text-white/40" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className={`text-[13px] truncate ${activeRightSidebarSelection.type === 'local' && activeRightSidebarSelection.id === playlist.id ? 'text-white' : 'text-white/70'}`}>{playlist.name}</div>
+                        <div className="text-[10px] text-white/40 mt-0.5">{playlist.songs.length} 首</div>
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
+            ) : (
+              <div className="flex-1 flex flex-col h-full">
+                <button
+                  onClick={() => setMobileRightView('list')}
+                  className="absolute top-[14px] left-[16px] z-[70] pointer-events-auto h-9 px-3 rounded-sm border text-white/60 hover:text-white flex items-center gap-1 text-[12px]"
+                  style={{ borderColor: colorWithAlpha(accentHex, 0.2), background: colorWithAlpha(accentHex, 0.06) }}
+                >
+                  <ChevronLeft size={16} /> 歌单
+                </button>
+                <div className="flex items-center justify-between p-5 pt-16 shrink-0">
+                  <div className="text-[13px] text-white/80 truncate">{activePlaylist?.name || 'Tracks'}</div>
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-white/30">
+                    {(activeRightSidebarSelection.type === 'local' ? (activePlaylist?.songs.length || 0) : (neteaseCloudSongs.length || 0))} Tracks
+                  </div>
+                </div>
+                <div className="flex-1 overflow-y-auto themed-scrollbar pb-5" ref={rightTracksScrollRef}>
+                  {(() => {
+                    const currentTracks = activeRightSidebarSelection.type === 'local' ? (activePlaylist?.songs || []) : neteaseCloudSongs;
+                    if (currentTracks.length === 0) return <div className="px-5 py-8 text-[12px] text-white/40">No songs in this playlist</div>;
+                    return currentTracks.map((song, index) => (
+                      <button
+                        key={songIdentity(song)}
+                        data-song-id={songIdentity(song)}
+                        onClick={() => loadNeteaseSong(song, currentTracks)}
+                        style={currentSongId === songIdentity(song) ? { boxShadow: `inset 3px 0 0 0 ${accentHex}` } : undefined}
+                        className={`w-full flex items-center gap-3 px-5 py-3 hover:bg-white/5 transition-colors text-left group ${currentSongId === songIdentity(song) ? 'bg-white/5' : ''}`}
+                      >
+                        <div className="w-4 text-center text-[10px] text-white/30 group-hover:hidden shrink-0">
+                          {(index + 1).toString().padStart(2, '0')}
+                        </div>
+                        <div className="w-4 text-center hidden group-hover:flex items-center justify-center text-white shrink-0">
+                          <Play size={10} />
+                        </div>
+                        <div className="w-8 h-8 rounded shrink-0 bg-white/10 overflow-hidden flex items-center justify-center">
+                          {song.cover ? (
+                            <img src={song.cover} className="w-full h-full object-cover" />
+                          ) : (
                             <ListMusic size={14} className="text-white/40" />
-                         )}
-                       </div>
-                       <div className="min-w-0 flex-1">
-                         <div className={`text-[12px] truncate ${activeRightSidebarSelection.type === 'local' && activeRightSidebarSelection.id === playlist.id ? 'text-white' : 'text-white/70'}`}>{playlist.name}</div>
-                         <div className="text-[10px] text-white/40 mt-0.5">{playlist.songs.length}</div>
-                       </div>
-                     </button>
-                   ))}
-                 </div>
-               )}
-
-               {/* NetEase Playlists */}
-               {isNeteaseCookieValid && (
-                 <div className="mb-4">
-                   <div className="px-5 py-2 text-[10px] uppercase tracking-[0.2em] text-white/50 sticky top-0 z-10 backdrop-blur-md" style={{ backgroundColor: colorWithAlpha(surfaceHex, 0.8) }}>NetEase Cloud</div>
-                   <button 
-                     onClick={() => {
-                       setActiveRightSidebarSelection({ type: 'netease_daily' });
-                       loadDailyRecommendations();
-                     }}
-                     className={`w-full flex items-center gap-3 px-5 py-3 hover:bg-white/5 transition-colors text-left ${activeRightSidebarSelection.type === 'netease_daily' ? 'bg-white/5' : ''}`}
-                   >
-                     <div className="w-8 h-8 rounded shrink-0 bg-white/10 flex items-center justify-center overflow-hidden text-white/40"><ListMusic size={14} /></div>
-                     <div className="min-w-0 flex-1"><div className={`text-[12px] truncate ${activeRightSidebarSelection.type === 'netease_daily' ? 'text-white' : 'text-white/70'}`}>{t('ui.text.74', lang)}</div></div>
-                   </button>
-                   <button 
-                     onClick={() => {
-                       setActiveRightSidebarSelection({ type: 'netease_liked' });
-                       loadLikedSongs('netease');
-                     }}
-                     className={`w-full flex items-center gap-3 px-5 py-3 hover:bg-white/5 transition-colors text-left ${activeRightSidebarSelection.type === 'netease_liked' ? 'bg-white/5' : ''}`}
-                   >
-                     <div className="w-8 h-8 rounded shrink-0 bg-white/10 flex items-center justify-center overflow-hidden text-white/40"><ListMusic size={14} /></div>
-                     <div className="min-w-0 flex-1"><div className={`text-[12px] truncate ${activeRightSidebarSelection.type === 'netease_liked' ? 'text-white' : 'text-white/70'}`}>{t('ui.text.75', lang)}</div></div>
-                   </button>
-                    {(() => {
-                      const sorted = [...fetchedNeteasePlaylists].sort((a, b) => {
-                        const aPinned = pinnedNeteasePlaylists.includes(String(a.id));
-                        const bPinned = pinnedNeteasePlaylists.includes(String(b.id));
-                        if (aPinned && !bPinned) return -1;
-                        if (!aPinned && bPinned) return 1;
-                        return 0;
-                      });
-                      const displayCount = Math.max(5, pinnedNeteasePlaylists.length);
-                      const visiblePlaylists = showAllNetease ? sorted : sorted.slice(0, displayCount);
-                      const hasMore = sorted.length > displayCount;
-
-                      return (
-                        <>
-                          {visiblePlaylists.map(playlist => {
-                            const isPinned = pinnedNeteasePlaylists.includes(String(playlist.id));
-                            return (
-                              <button 
-                                key={playlist.id} 
-                                onClick={() => {
-                                  setActiveRightSidebarSelection({ type: 'netease_playlist', id: playlist.id });
-                                  loadNeteasePlaylistSongs(playlist);
-                                }}
-                                className={`w-full flex items-center gap-3 px-5 py-3 hover:bg-white/5 transition-colors text-left group ${activeRightSidebarSelection.type === 'netease_playlist' && activeRightSidebarSelection.id === playlist.id ? 'bg-white/5' : ''}`}
-                              >
-                                <div className="w-8 h-8 rounded shrink-0 bg-white/10 flex items-center justify-center overflow-hidden">
-                                  {playlist.cover ? <img src={playlist.cover} className="w-full h-full object-cover" /> : <ListMusic size={14} className="text-white/40" />}
-                                </div>
-                                <div className="min-w-0 flex-1"><div className={`text-[12px] truncate ${activeRightSidebarSelection.type === 'netease_playlist' && activeRightSidebarSelection.id === playlist.id ? 'text-white' : 'text-white/70'}`}>{playlist.name}</div></div>
-                                <div 
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    if (isPinned) {
-                                      setPinnedNeteasePlaylists(prev => prev.filter(id => id !== String(playlist.id)));
-                                    } else {
-                                      setPinnedNeteasePlaylists(prev => [...prev, String(playlist.id)]);
-                                    }
-                                  }}
-                                  className={`shrink-0 p-1 rounded hover:bg-white/10 transition-colors ${isPinned ? 'opacity-100 text-cyan-400' : 'opacity-0 group-hover:opacity-100 text-white/40 hover:text-white'}`}
-                                  title={isPinned ? t('ui.text.76', lang) : t('ui.text.77', lang)}
-                                >
-                                  <Pin size={14} className={isPinned ? "fill-cyan-400/20" : ""} />
-                                </div>
-                              </button>
-                            );
-                          })}
-                          {hasMore && (
-                            <button
-                              onClick={() => setShowAllNetease(!showAllNetease)}
-                              className="w-full flex items-center justify-center gap-2 px-5 py-3 text-[10px] uppercase tracking-[0.1em] text-white/40 hover:text-white hover:bg-white/5 transition-colors"
-                            >
-                              {showAllNetease ? (
-                                <><ChevronUp size={14} /> {t('ui.text.78', lang)}</>
-                              ) : (
-                                <><ChevronDown size={14} /> {t('ui.text.79', lang)}{sorted.length})</>
-                              )}
-                            </button>
                           )}
-                        </>
-                      );
-                    })()}
-                 </div>
-               )}
-
-               {/* QQ Playlists */}
-               {isQQCookieValid && (
-                 <div className="mb-4">
-                   <div className="px-5 py-2 text-[10px] uppercase tracking-[0.2em] text-white/50 sticky top-0 z-10 backdrop-blur-md" style={{ backgroundColor: colorWithAlpha(surfaceHex, 0.8) }}>QQ Music</div>
-                   <button 
-                     onClick={() => {
-                       setActiveRightSidebarSelection({ type: 'qq_liked' });
-                       loadLikedSongs('qq');
-                     }}
-                     className={`w-full flex items-center gap-3 px-5 py-3 hover:bg-white/5 transition-colors text-left ${activeRightSidebarSelection.type === 'qq_liked' ? 'bg-white/5' : ''}`}
-                   >
-                     <div className="w-8 h-8 rounded shrink-0 bg-white/10 flex items-center justify-center overflow-hidden text-white/40"><ListMusic size={14} /></div>
-                     <div className="min-w-0 flex-1"><div className={`text-[12px] truncate ${activeRightSidebarSelection.type === 'qq_liked' ? 'text-white' : 'text-white/70'}`}>{t('ui.text.80', lang)}</div></div>
-                   </button>
-                    {(() => {
-                      const sorted = [...fetchedQQPlaylists].sort((a, b) => {
-                        const aPinned = pinnedQQPlaylists.includes(String(a.id));
-                        const bPinned = pinnedQQPlaylists.includes(String(b.id));
-                        if (aPinned && !bPinned) return -1;
-                        if (!aPinned && bPinned) return 1;
-                        return 0;
-                      });
-                      const displayCount = Math.max(5, pinnedQQPlaylists.length);
-                      const visiblePlaylists = showAllQQ ? sorted : sorted.slice(0, displayCount);
-                      const hasMore = sorted.length > displayCount;
-
-                      return (
-                        <>
-                          {visiblePlaylists.map(playlist => {
-                            const isPinned = pinnedQQPlaylists.includes(String(playlist.id));
-                            return (
-                              <button 
-                                key={playlist.id} 
-                                onClick={() => {
-                                  setActiveRightSidebarSelection({ type: 'qq_playlist', id: playlist.id });
-                                  loadNeteasePlaylistSongs(playlist);
-                                }}
-                                className={`w-full flex items-center gap-3 px-5 py-3 hover:bg-white/5 transition-colors text-left group ${activeRightSidebarSelection.type === 'qq_playlist' && activeRightSidebarSelection.id === playlist.id ? 'bg-white/5' : ''}`}
-                              >
-                                <div className="w-8 h-8 rounded shrink-0 bg-white/10 flex items-center justify-center overflow-hidden">
-                                  {playlist.cover ? <img src={playlist.cover} className="w-full h-full object-cover" /> : <ListMusic size={14} className="text-white/40" />}
-                                </div>
-                                <div className="min-w-0 flex-1"><div className={`text-[12px] truncate ${activeRightSidebarSelection.type === 'qq_playlist' && activeRightSidebarSelection.id === playlist.id ? 'text-white' : 'text-white/70'}`}>{playlist.name}</div></div>
-                                <div 
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    if (isPinned) {
-                                      setPinnedQQPlaylists(prev => prev.filter(id => id !== String(playlist.id)));
-                                    } else {
-                                      setPinnedQQPlaylists(prev => [...prev, String(playlist.id)]);
-                                    }
-                                  }}
-                                  className={`shrink-0 p-1 rounded hover:bg-white/10 transition-colors ${isPinned ? 'opacity-100 text-cyan-400' : 'opacity-0 group-hover:opacity-100 text-white/40 hover:text-white'}`}
-                                  title={isPinned ? t('ui.text.81', lang) : t('ui.text.82', lang)}
-                                >
-                                  <Pin size={14} className={isPinned ? "fill-cyan-400/20" : ""} />
-                                </div>
-                              </button>
-                            );
-                          })}
-                          {hasMore && (
-                            <button
-                              onClick={() => setShowAllQQ(!showAllQQ)}
-                              className="w-full flex items-center justify-center gap-2 px-5 py-3 text-[10px] uppercase tracking-[0.1em] text-white/40 hover:text-white hover:bg-white/5 transition-colors"
-                            >
-                              {showAllQQ ? (
-                                <><ChevronUp size={14} /> {t('ui.text.83', lang)}</>
-                              ) : (
-                                <><ChevronDown size={14} /> {t('ui.text.84', lang)}{sorted.length})</>
-                              )}
-                            </button>
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className={`text-[12px] truncate ${currentSongId === songIdentity(song) ? 'text-white' : 'text-white/80'}`}>{song.name}</div>
+                          <div className="text-[10px] text-white/40 mt-0.5 truncate">{song.artist || 'Unknown'}</div>
+                        </div>
+                        <div className="text-[10px] text-white/30 shrink-0">
+                          {formatTime(song.duration ? song.duration / 1000 : 0)}
+                        </div>
+                      </button>
+                    ));
+                  })()}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          /* 桌面端：保持原有双栏 */
+          <div className="sonic-right-col flex h-full w-[540px]">
+            {/* Playlists Column */}
+            <div className="w-[200px] border-r flex flex-col h-full" style={{ borderColor: colorWithAlpha(accentHex, 0.18) }}>
+              <div className="p-5 text-[10px] uppercase tracking-[0.2em] text-white/50 shrink-0">Playlists</div>
+              <div className="flex-1 overflow-y-auto themed-scrollbar pb-5">
+                {/* Local Playlists */}
+                {playlists.length > 0 && (
+                  <div className="mb-4">
+                    <div className="px-5 py-2 text-[10px] uppercase tracking-[0.2em] text-white/50 sticky top-0 z-10 backdrop-blur-md" style={{ backgroundColor: colorWithAlpha(surfaceHex, 0.8) }}>Local</div>
+                    {playlists.map(playlist => (
+                      <button 
+                        key={playlist.id} 
+                        onClick={() => {
+                          setActivePlaylistId(playlist.id);
+                          setActiveRightSidebarSelection({ type: 'local', id: playlist.id });
+                        }}
+                        className={`w-full flex items-center gap-3 px-5 py-3 hover:bg-white/5 transition-colors text-left ${activeRightSidebarSelection.type === 'local' && activeRightSidebarSelection.id === playlist.id ? 'bg-white/5' : ''}`}
+                      >
+                        <div className="w-8 h-8 rounded shrink-0 bg-white/10 flex items-center justify-center overflow-hidden">
+                          {playlist.songs[0]?.cover ? (
+                            <img src={playlist.songs[0].cover} className="w-full h-full object-cover" />
+                          ) : (
+                            <ListMusic size={14} className="text-white/40" />
                           )}
-                        </>
-                      );
-                    })()}
-                 </div>
-               )}
-             </div>
-           </div>
-           
-           {/* Tracks Column */}
-           <div className="flex-1 flex flex-col h-full">
-             <div className="flex items-center justify-between p-5 shrink-0">
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className={`text-[12px] truncate ${activeRightSidebarSelection.type === 'local' && activeRightSidebarSelection.id === playlist.id ? 'text-white' : 'text-white/70'}`}>{playlist.name}</div>
+                          <div className="text-[10px] text-white/40 mt-0.5">{playlist.songs.length}</div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+            
+            {/* Tracks Column */}
+            <div className="flex-1 flex flex-col h-full">
+              <div className="flex items-center justify-between p-5 shrink-0">
                 <div className="text-[10px] uppercase tracking-[0.2em] text-white/50">Tracks</div>
                 <div className="text-[10px] uppercase tracking-[0.2em] text-white/30">
                   {activeRightSidebarSelection.type === 'local' ? (activePlaylist?.songs.length || 0) : (neteaseCloudSongs.length || 0)} Tracks
                 </div>
-             </div>
-             <div className="flex-1 overflow-y-auto themed-scrollbar pb-5">
-               {(() => {
-                 const currentTracks = activeRightSidebarSelection.type === 'local' ? (activePlaylist?.songs || []) : neteaseCloudSongs;
-                 if (currentTracks.length === 0) return <div className="px-5 py-8 text-[12px] text-white/40">No songs in this playlist</div>;
-                 return currentTracks.map((song, index) => (
-                   <button
-                     key={songIdentity(song)}
-                     onClick={() => loadNeteaseSong(song, currentTracks)}
-                     className={`w-full flex items-center gap-3 px-5 py-3 hover:bg-white/5 transition-colors text-left group ${currentSongId === songIdentity(song) ? 'bg-white/5' : ''}`}
-                   >
-                     <div className="w-4 text-center text-[10px] text-white/30 group-hover:hidden shrink-0">
-                       {(index + 1).toString().padStart(2, '0')}
-                     </div>
-                     <div className="w-4 text-center hidden group-hover:flex items-center justify-center text-white shrink-0">
-                       <Play size={10} />
-                     </div>
-                     <div className="w-8 h-8 rounded shrink-0 bg-white/10 overflow-hidden flex items-center justify-center">
+              </div>
+              <div className="flex-1 overflow-y-auto themed-scrollbar pb-5" ref={rightTracksScrollRef}>
+                {(() => {
+                  const currentTracks = activeRightSidebarSelection.type === 'local' ? (activePlaylist?.songs || []) : neteaseCloudSongs;
+                  if (currentTracks.length === 0) return <div className="px-5 py-8 text-[12px] text-white/40">No songs in this playlist</div>;
+                  return currentTracks.map((song, index) => (
+                    <button
+                      key={songIdentity(song)}
+                      data-song-id={songIdentity(song)}
+                      onClick={() => loadNeteaseSong(song, currentTracks)}
+                      style={currentSongId === songIdentity(song) ? { boxShadow: `inset 3px 0 0 0 ${accentHex}` } : undefined}
+                      className={`w-full flex items-center gap-3 px-5 py-3 hover:bg-white/5 transition-colors text-left group ${currentSongId === songIdentity(song) ? 'bg-white/5' : ''}`}
+                    >
+                      <div className="w-4 text-center text-[10px] text-white/30 group-hover:hidden shrink-0">
+                        {(index + 1).toString().padStart(2, '0')}
+                      </div>
+                      <div className="w-4 text-center hidden group-hover:flex items-center justify-center text-white shrink-0">
+                        <Play size={10} />
+                      </div>
+                      <div className="w-8 h-8 rounded shrink-0 bg-white/10 overflow-hidden flex items-center justify-center">
                         {song.cover ? (
-                           <img src={song.cover} className="w-full h-full object-cover" />
+                          <img src={song.cover} className="w-full h-full object-cover" />
                         ) : (
-                           <ListMusic size={14} className="text-white/40" />
+                          <ListMusic size={14} className="text-white/40" />
                         )}
-                     </div>
-                     <div className="min-w-0 flex-1">
-                       <div className={`text-[12px] truncate ${currentSongId === songIdentity(song) ? 'text-white' : 'text-white/80'}`}>{song.name}</div>
-                       <div className="text-[10px] text-white/40 mt-0.5 truncate">{song.artist || 'Unknown'}</div>
-                     </div>
-                     <div className="text-[10px] text-white/30 shrink-0">
-                       {formatTime(song.duration ? song.duration / 1000 : 0)}
-                     </div>
-                   </button>
-                 ));
-               })()}
-             </div>
-           </div>
-        </div>
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className={`text-[12px] truncate ${currentSongId === songIdentity(song) ? 'text-white' : 'text-white/80'}`}>{song.name}</div>
+                        <div className="text-[10px] text-white/40 mt-0.5 truncate">{song.artist || 'Unknown'}</div>
+                      </div>
+                      <div className="text-[10px] text-white/30 shrink-0">
+                        {formatTime(song.duration ? song.duration / 1000 : 0)}
+                      </div>
+                    </button>
+                  ));
+                })()}
+              </div>
+            </div>
+          </div>
+        )}
       </aside>
       </div>
 
       {/* Brand Mark */}
-      {displaySettings.showLeftIcon && (
+      {(displaySettings.showLeftIcon || isMobile) && !(isMobile && isRightSidebarOpen) && (
         <button
           type="button"
-          className={`brand-mark absolute top-[88px] left-[56px] z-50 pointer-events-auto cursor-pointer transition-opacity hover:opacity-100 ${isMobileSideNavOpen ? 'opacity-100' : 'opacity-40'}`}
+          className={`brand-mark sonic-left-toggle absolute z-[62] pointer-events-auto cursor-pointer transition-opacity hover:opacity-100 ${
+            isMobile
+              ? 'top-[10px] left-[10px] flex items-center justify-center'
+              : 'top-[88px] left-[56px]'
+          } ${isMobileSideNavOpen ? 'opacity-100' : 'opacity-60'}`}
           aria-label={isMobileSideNavOpen ? t('ui.text.85', lang) : t('ui.text.86', lang)}
           aria-expanded={isMobileSideNavOpen}
           onClick={() => {
@@ -1983,41 +1569,29 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
           }}
           style={{ color: isMobileSideNavOpen ? sideNavActiveColor : (isLightSurface ? readableAccent : 'rgba(255, 255, 255, 0.96)') }}
         >
-          <Settings size={24} />
+          {isMobile ? <Settings size={22} /> : <Settings size={24} />}
         </button>
       )}
 
       {/* Player Panel */}
       {showSearchPanel && (
-        <div className="absolute top-[40px] left-[100px] w-[360px] max-h-[70vh] z-50 pointer-events-auto backdrop-blur-[20px] border rounded-sm overflow-hidden" style={themedPanelStyle(accentHex, 0.82)}>
+        <div className="sonic-panel absolute top-[40px] left-[100px] w-[360px] max-h-[70vh] z-50 pointer-events-auto backdrop-blur-[20px] border rounded-sm overflow-hidden" style={themedPanelStyle(accentHex, 0.82)}>
           <div className="p-5 border-b" style={{ borderColor: colorWithAlpha(accentHex, 0.18) }}>
             <div className="flex items-center justify-between mb-4">
               <div className="text-[12px] uppercase tracking-[0.2em] text-white/70">Music Search</div>
               <button onClick={() => setShowSearchPanel(false)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">Close</button>
             </div>
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div className="text-[11px] text-white/38">
-                {t('ui.text.87', lang)}{effectiveSearchLabel}
-              </div>
-              {hasBothCloudLogins && (
-                <div className="grid grid-cols-2 rounded-sm border bg-white/[0.025] p-0.5" style={{ borderColor: colorWithAlpha(accentHex, 0.18) }}>
-                  {[
-                    { id: 'netease' as const, label: t('ui.text.88', lang) },
-                    { id: 'qq' as const, label: t('ui.text.89', lang) },
-                  ].map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => setSearchProvider(item.id)}
-                      className={`px-3 py-1.5 text-[10px] tracking-[0.12em] transition-colors ${effectiveSearchProvider === item.id ? 'border border-transparent' : 'text-white/45 hover:text-white'}`}
-                      style={effectiveSearchProvider === item.id ? activeControlStyle(accentHex) : undefined}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div className="text-[11px] text-white/38">
+                  {t('ui.text.87', lang)}{effectiveSearchLabel}
                 </div>
-              )}
-            </div>
+                <div
+                  className="rounded-sm border px-2 py-1.5 text-[10px] tracking-[0.12em]"
+                  style={{ borderColor: colorWithAlpha(accentHex, 0.18), background: colorWithAlpha(accentHex, 0.12), color: accentHex }}
+                >
+                  Meting
+                </div>
+              </div>
             <form
               className="flex gap-2"
               onSubmit={(e) => {
@@ -2084,7 +1658,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
       )}
 
       {songToAdd && (
-        <div className="absolute top-[120px] left-[480px] w-[280px] z-[70] pointer-events-auto backdrop-blur-[20px] border rounded-sm overflow-hidden" style={themedPanelStyle(accentHex, 0.88)}>
+        <div className="sonic-panel absolute top-[120px] left-[480px] w-[280px] z-[70] pointer-events-auto backdrop-blur-[20px] border rounded-sm overflow-hidden" style={themedPanelStyle(accentHex, 0.88)}>
           <div className="p-5 border-b" style={{ borderColor: colorWithAlpha(accentHex, 0.18) }}>
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
@@ -2133,8 +1707,61 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
         </div>
       )}
 
+      {songsToAddAll && (
+        <div className="sonic-panel absolute top-[120px] left-[480px] w-[300px] z-[70] pointer-events-auto backdrop-blur-[20px] border rounded-sm overflow-hidden" style={themedPanelStyle(accentHex, 0.88)}>
+          <div className="p-5 border-b" style={{ borderColor: colorWithAlpha(accentHex, 0.18) }}>
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="text-[10px] uppercase tracking-[0.18em] text-white/45 mb-2">Add All To Playlist</div>
+                <div className="text-[13px] text-white">{songsToAddAll.length} 首歌曲</div>
+              </div>
+              <button onClick={() => setSongsToAddAll(null)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">Close</button>
+            </div>
+          </div>
+          <div className="p-3 border-b" style={{ borderColor: colorWithAlpha(accentHex, 0.18) }}>
+            {playlists.map((playlist) => (
+              <button
+                key={playlist.id}
+                onClick={() => {
+                  addSongsToPlaylist(playlist.id, songsToAddAll);
+                  setSongsToAddAll(null);
+                }}
+                className="w-full flex items-center justify-between gap-3 px-3 py-3 text-left hover:bg-white/5 rounded-sm transition-colors"
+              >
+                <span className="min-w-0 text-[12px] text-white truncate">{playlist.name}</span>
+                <span className="text-[10px] text-white/35">{playlist.songs.length}</span>
+              </button>
+            ))}
+          </div>
+          <form
+            className="p-4 flex gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              createPlaylistFromAllSongs();
+            }}
+          >
+            <input
+              value={newPlaylistName}
+              onChange={(e) => setNewPlaylistName(e.target.value)}
+              placeholder="新建歌单并全部加入"
+              className="min-w-0 flex-1 bg-white/[0.035] border rounded-sm px-3 py-2 text-[12px] text-white outline-none focus:border-white/30"
+              style={{ borderColor: colorWithAlpha(accentHex, 0.16) }}
+            />
+            <button
+              type="submit"
+              className="h-9 w-9 flex-shrink-0 rounded-sm border flex items-center justify-center disabled:opacity-50"
+              style={primaryGhostStyle(accentHex)}
+              disabled={!newPlaylistName.trim()}
+              title="Create playlist"
+            >
+              <Plus size={15} />
+            </button>
+          </form>
+        </div>
+      )}
+
       {showPlaylistPanel && (
-        <div className="absolute top-[40px] left-[100px] w-[420px] max-h-[74vh] z-[65] pointer-events-auto backdrop-blur-[20px] border rounded-sm overflow-hidden" style={themedPanelStyle(accentHex, 0.84)}>
+        <div className="sonic-panel absolute top-[40px] left-[100px] w-[420px] max-h-[74vh] z-[65] pointer-events-auto backdrop-blur-[20px] border rounded-sm overflow-hidden" style={themedPanelStyle(accentHex, 0.84)}>
           <div className="p-5 border-b" style={{ borderColor: colorWithAlpha(accentHex, 0.18) }}>
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-3 text-[12px] uppercase tracking-[0.2em] text-white/70">
@@ -2166,11 +1793,13 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
               </button>
             </div>
           </div>
-          <div className="themed-scrollbar max-h-[52vh] overflow-y-auto">
+          <div className="themed-scrollbar max-h-[52vh] overflow-y-auto" ref={playlistPanelScrollRef}>
             {activePlaylist && activePlaylist.songs.length > 0 ? activePlaylist.songs.map((song) => (
               <button
                 key={songIdentity(song)}
+                data-song-id={songIdentity(song)}
                 onClick={() => loadNeteaseSong(song, activePlaylist.songs)}
+                style={currentSongId === songIdentity(song) ? { boxShadow: `inset 3px 0 0 0 ${accentHex}` } : undefined}
                 className="relative flex w-full items-center gap-3 px-5 py-4 pr-16 text-left border-b border-white/5 hover:bg-white/5 transition-colors"
               >
                 <CoverArt src={song.cover} title={song.name} className="h-10 w-10" iconSize={15} />
@@ -2205,126 +1834,60 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
         </div>
       )}
 
-      {showAudioInputPanel && (
-        <div className="absolute top-[40px] left-[100px] w-[420px] z-[67] pointer-events-auto backdrop-blur-[20px] border rounded-sm overflow-hidden" style={themedPanelStyle(accentHex, 0.86)}>
-          <div className="p-5 border-b" style={{ borderColor: colorWithAlpha(accentHex, 0.18) }}>
-            <div className="flex items-center justify-between gap-4">
-              <div className="flex items-center gap-3 text-[12px] uppercase tracking-[0.2em] text-white/70">
-                <Volume2 size={15} />
-                Audio Input
-              </div>
-              <button onClick={() => setShowAudioInputPanel(false)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">Close</button>
-            </div>
-          </div>
-
-          <div className="p-5 space-y-4">
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={startSystemAudioInput}
-                className={`min-h-[74px] rounded-sm border px-3 py-3 text-left transition-colors ${audioInputMode === 'system' ? '' : 'border-white/10 text-white/55 hover:text-white hover:bg-white/5'}`}
-                style={audioInputMode === 'system' ? activeControlStyle(accentHex) : undefined}
-              >
-                <Volume2 size={16} className="mb-2" />
-                <div className="text-[11px] uppercase tracking-[0.14em]">System Audio</div>
-                <div className="mt-1 text-[10px] opacity-55">Windows loopback</div>
-              </button>
-              <button
-                onClick={() => startMicrophoneInput()}
-                className={`min-h-[74px] rounded-sm border px-3 py-3 text-left transition-colors ${audioInputMode === 'microphone' ? '' : 'border-white/10 text-white/55 hover:text-white hover:bg-white/5'}`}
-                style={audioInputMode === 'microphone' ? activeControlStyle(accentHex) : undefined}
-              >
-                <Mic size={16} className="mb-2" />
-                <div className="text-[11px] uppercase tracking-[0.14em]">Microphone</div>
-                <div className="mt-1 text-[10px] opacity-55">Input devices</div>
-              </button>
-            </div>
-
-            <div>
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <label className="text-[10px] uppercase tracking-[0.18em] text-white/45">Microphone Device</label>
-                <button onClick={refreshAudioInputDevices} className="text-[10px] uppercase tracking-[0.14em] text-white/40 hover:text-white">Refresh</button>
-              </div>
-              <select
-                value={selectedAudioInputId}
-                onChange={(event) => setSelectedAudioInputId(event.target.value)}
-                className="w-full rounded-sm border bg-black/30 px-3 py-2 text-[12px] text-white outline-none"
-                style={{ borderColor: colorWithAlpha(accentHex, 0.2) }}
-              >
-                {audioInputDevices.length > 0 ? audioInputDevices.map((device) => (
-                  <option key={device.id} value={device.id}>{device.label}</option>
-                )) : (
-                  <option value="">Allow microphone permission to show devices</option>
-                )}
-              </select>
-            </div>
-
-            {audioInputMode !== 'player' && (
-              <button
-                onClick={returnToPlayerInput}
-                className="w-full rounded-sm border px-3 py-2 text-[10px] uppercase tracking-[0.14em] text-white/55 hover:text-white hover:bg-white/5"
-                style={{ borderColor: colorWithAlpha(accentHex, 0.16) }}
-              >
-                Stop Input
-              </button>
-            )}
-
-            {audioInputStatus && (
-              <div className="rounded-sm border px-3 py-2 text-[11px] leading-relaxed text-white/55" style={{ borderColor: colorWithAlpha(accentHex, 0.14) }}>
-                {audioInputStatus}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {showNeteasePanel && (
-        <div className="absolute top-[40px] left-[100px] w-[460px] max-h-[76vh] z-[66] pointer-events-auto backdrop-blur-[20px] border rounded-sm overflow-hidden" style={themedPanelStyle(accentHex, 0.86)}>
+      {showMetingPanel && (
+        <div className="sonic-panel absolute top-[40px] left-[100px] w-[460px] max-h-[76vh] z-[66] pointer-events-auto backdrop-blur-[20px] border rounded-sm overflow-hidden" style={themedPanelStyle(accentHex, 0.86)}>
           <div className="p-5 border-b" style={{ borderColor: colorWithAlpha(accentHex, 0.18) }}>
             <div className="flex items-center justify-between mb-4">
-              <div className="text-[12px] uppercase tracking-[0.2em] text-white/70">{activeCloudLabel}</div>
-              <button onClick={() => setShowNeteasePanel(false)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">{t('ui.text.92', lang)}</button>
+              <div className="text-[12px] uppercase tracking-[0.2em] text-white/70">Meting 接口</div>
+              <button onClick={() => setShowMetingPanel(false)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">Close</button>
             </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => loadLikedSongs()}
-                className={`px-3 py-2 rounded-sm border text-[10px] uppercase tracking-[0.12em] transition-colors ${neteaseCloudTab === 'liked' ? '' : 'text-white/45 border-white/10 hover:text-white'}`}
-                style={neteaseCloudTab === 'liked' ? activeControlStyle(accentHex) : undefined}
-              >
-                {t('ui.text.93', lang)}</button>
-              <button
-                onClick={() => loadNeteasePlaylists()}
-                className={`px-3 py-2 rounded-sm border text-[10px] uppercase tracking-[0.12em] transition-colors ${neteaseCloudTab === 'playlists' ? '' : 'text-white/45 border-white/10 hover:text-white'}`}
-                style={neteaseCloudTab === 'playlists' ? activeControlStyle(accentHex) : undefined}
-              >
-                {t('ui.text.94', lang)}</button>
-              {cloudProvider === 'netease' && (
+            <div className="flex flex-col gap-3">
+              <div className="flex gap-2">
+                <input
+                  value={metingPlaylistId}
+                  onChange={(e) => setMetingPlaylistId(e.target.value)}
+                  placeholder="歌单 ID 或分享链接中的 id"
+                  className="min-w-0 flex-1 bg-white/[0.035] border rounded-sm px-3 py-2 text-[12px] text-white outline-none focus:border-white/30"
+                  style={{ borderColor: colorWithAlpha(accentHex, 0.16) }}
+                />
                 <button
-                  onClick={() => loadDailyRecommendations()}
-                  className={`px-3 py-2 rounded-sm border text-[10px] uppercase tracking-[0.12em] transition-colors ${neteaseCloudTab === 'daily' ? '' : 'text-white/45 border-white/10 hover:text-white'}`}
-                  style={neteaseCloudTab === 'daily' ? activeControlStyle(accentHex) : undefined}
+                  type="button"
+                  onClick={() => loadMetingCloudSongs(metingPlaylistId, metingPanelServer)}
+                  className="px-3 py-2 text-[10px] uppercase tracking-[0.15em] rounded-sm border"
+                  style={primaryGhostStyle(accentHex)}
                 >
-                  {t('ui.text.95', lang)}</button>
-              )}
+                  加载
+                </button>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSongsToAddAll(neteaseCloudSongs.length ? neteaseCloudSongs : null)}
+                  disabled={neteaseCloudSongs.length === 0}
+                  className="flex-1 px-3 py-2 text-[10px] uppercase tracking-[0.15em] rounded-sm border disabled:opacity-40"
+                  style={primaryGhostStyle(accentHex)}
+                >
+                  全部加入歌单
+                </button>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-white/45">音源</span>
+                <div className="grid grid-cols-5 gap-1 rounded-sm border bg-white/[0.025] p-0.5" style={{ borderColor: colorWithAlpha(accentHex, 0.18) }}>
+                  {(['tencent'] as const).map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => setMetingPanelServer(s)}
+                      className={`px-2 py-1 text-[10px] tracking-[0.08em] transition-colors ${metingPanelServer === s ? 'border border-transparent' : 'text-white/45 hover:text-white'}`}
+                      style={metingPanelServer === s ? activeControlStyle(accentHex) : undefined}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
-
-          {neteaseCloudTab === 'playlists' && (
-            <div className="themed-scrollbar p-3 border-b max-h-[140px] overflow-y-auto" style={{ borderColor: colorWithAlpha(accentHex, 0.18) }}>
-              {neteaseCloudPlaylists.length > 0 ? neteaseCloudPlaylists.map((playlist) => (
-                <button
-                  key={playlist.id}
-                  onClick={() => loadNeteasePlaylistSongs(playlist)}
-                  className={`w-full flex items-center justify-between gap-3 px-3 py-3 text-left hover:bg-white/5 rounded-sm transition-colors ${activeNeteasePlaylistId === playlist.id ? 'bg-white/5' : ''}`}
-                >
-                  <span className="min-w-0 text-[12px] text-white truncate">{playlist.name}</span>
-                  <span className="text-[10px] text-white/35">{playlist.trackCount}</span>
-                </button>
-              )) : (
-                <div className="px-3 py-4 text-[12px] text-white/40">{isLoadingNeteaseCloud ? t('ui.text.96', lang) : `点击“歌单”加载你的${activeCloudLabel}歌单`}</div>
-              )}
-            </div>
-          )}
-
           {neteaseCloudStatus && <div className="px-5 py-3 border-b border-white/5 text-[11px] text-white/45">{neteaseCloudStatus}</div>}
           <NeteaseSongList
             songs={neteaseCloudSongs}
@@ -2332,7 +1895,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
             queue={neteaseCloudSongs}
             onPlay={loadNeteaseSong}
             onFavorite={addSongToFavorites}
-            emptyText={isLoadingNeteaseCloud ? t('ui.text.97', lang) : t('ui.text.98', lang)}
+            emptyText={isLoadingNeteaseCloud ? '加载中…' : '输入歌单 ID 后点击「加载」，从你的 Meting 接口拉取歌曲。'}
             accentHex={accentHex}
           />
         </div>
@@ -2340,7 +1903,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
 
       {pendingDelete && (
         <div className="absolute inset-0 z-[120] pointer-events-auto flex items-center justify-center backdrop-blur-sm" style={{ background: colorWithAlpha(accentHex, 0.12) }}>
-          <div className="w-[320px] border rounded-sm p-5" style={themedPanelStyle(accentHex, 0.9)}>
+          <div className="w-[320px] max-w-[90vw] border rounded-sm p-5" style={themedPanelStyle(accentHex, 0.9)}>
             <div className="text-[12px] uppercase tracking-[0.2em] text-white/70 mb-3">
               Confirm Delete
             </div>
@@ -2366,18 +1929,24 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
       )}
 
       {/* Player Panel Area with Hover Trigger */}
-      <div 
-        className="absolute bottom-0 left-0 w-full h-[120px] z-40 pointer-events-auto"
-          onMouseEnter={(e) => {
-            if (e.buttons !== 0) return;
-            if (Date.now() - lastPointerUpTime.current < 100) return;
-            setIsBottomPanelOpen(true);
-          }}
-          onMouseLeave={() => setIsBottomPanelOpen(false)}
-        >
+      <div
+        className={`absolute bottom-0 left-0 w-full ${isMobile ? 'h-[160px]' : 'h-[120px]'} z-40 ${
+          isMobile ? 'pointer-events-none' : 'pointer-events-auto'
+        }`}
+        onMouseEnter={(e) => {
+          if (isMobile) return;
+          if (e.buttons !== 0) return;
+          if (Date.now() - lastPointerUpTime.current < 100) return;
+          setIsBottomPanelOpen(true);
+        }}
+        onMouseLeave={() => {
+          if (isMobile) return;
+          setIsBottomPanelOpen(false);
+        }}
+      >
           {/* Minimal Progress Bar (visible only when player is hidden) */}
-          <div 
-            className={`fixed bottom-[4px] left-1/2 -translate-x-1/2 w-[900px] max-w-[90vw] h-[2px] bg-white/10 rounded-full overflow-hidden transition-all duration-500 pointer-events-none z-[9999] ${
+          <div
+            className={`fixed bottom-[4px] h-[2px] bg-white/10 rounded-full overflow-hidden transition-all duration-500 pointer-events-none z-[9999] left-1/2 -translate-x-1/2 w-[900px] max-w-[92vw] ${
               !(displaySettings.showBottomPlayer || isBottomPanelOpen) ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-full'
             }`}
           >
@@ -2392,7 +1961,11 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
           </div>
 
           <div
-            className={`player-panel absolute left-1/2 -translate-x-1/2 flex w-[900px] max-w-[90vw] items-center gap-6 rounded-2xl border border-white/10 px-6 py-3 pointer-events-auto backdrop-blur-[22px] transition-all duration-300 ${
+            className={`player-panel absolute flex items-center gap-6 rounded-2xl border border-white/10 px-6 py-3 pointer-events-auto backdrop-blur-[22px] transition-all duration-300 ${
+              isMobile
+                ? 'left-3 right-3 w-auto'
+                : 'left-1/2 -translate-x-1/2 w-[900px] max-w-[92vw]'
+            } ${
               displaySettings.showBottomPlayer || isBottomPanelOpen
                 ? 'bottom-[20px] opacity-100 translate-y-0'
                 : '-bottom-[20px] opacity-0 translate-y-full'
@@ -2402,136 +1975,305 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
             boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.10), 0 18px 50px rgba(0,0,0,0.3)',
           }}
         >
-          <div className="flex shrink-0 items-center justify-center">
-            <CoverArt src={currentCover} title={trackName} className="h-[48px] w-[48px] shadow-[0_4px_10px_rgba(0,0,0,0.28)]" iconSize={20} />
-          </div>
-          
-          <div className="flex min-w-0 shrink-0 w-[200px] flex-col justify-center">
-            <MarqueeTitle title={trackName} />
-            <div className="mt-1 text-[10px] leading-4 text-white/45 uppercase tracking-[0.14em]">
-              {songSourceLabel(currentSong)}
-            </div>
-          </div>
+          {isMobile ? (
+            /* 移动端：三行布局 */
+            <div className="flex flex-col w-full h-full justify-between py-1 gap-y-2">
+              {/* Row 1: cover + song/artist + platform */}
+              <div className="flex items-center justify-between w-full min-w-0">
+                <div className="flex items-center gap-3 min-w-0">
+                  <CoverArt src={currentCover} title={trackName} className="h-[44px] w-[44px] shadow-[0_4px_10px_rgba(0,0,0,0.28)]" iconSize={20} />
+                  <div className="flex flex-col justify-center min-w-0">
+                    <div className="text-[13px] text-white/90 truncate font-medium leading-5">{currentSong?.name || trackName}</div>
+                    {currentSong?.artist && (
+                      <div className="text-[11px] text-white/45 truncate leading-4">{currentSong.artist}</div>
+                    )}
+                  </div>
+                </div>
+                <div className="text-[10px] text-white/45 uppercase tracking-[0.12em] shrink-0 ml-2">
+                  {songSourceLabel(currentSong)}
+                </div>
+              </div>
 
-          {/* Progress bar */}
-          <div className="flex-1 flex items-center gap-3">
-             <span className="text-[10px] text-white/55 tabular-nums uppercase tracking-[0.1em] shrink-0 w-[34px] text-right">{formatTime(currentTime)}</span>
-             <div className="relative flex-1 flex h-[12px] items-center group">
-               <div className="w-full relative h-[2px] bg-white/10 group-hover:h-[4px] transition-all rounded-full overflow-hidden">
-                  <div 
-                     className="absolute top-0 left-0 h-full"
-                     style={{ backgroundColor: accentHex, width: `${duration ? (currentTime / duration) * 100 : 0}%`, boxShadow: `0 0 10px ${accentHex}88` }}
+              {/* Row 2: start time / progress / end time */}
+              <div className="w-full flex items-center gap-2 text-white/55">
+                <span className="text-[10px] tabular-nums uppercase tracking-[0.08em] shrink-0 w-[34px] text-right">{formatTime(currentTime)}</span>
+                <div className="relative flex-1 flex h-[14px] items-center group">
+                  <div className="w-full relative h-[3px] bg-white/10 group-hover:h-[5px] transition-all rounded-full overflow-hidden">
+                    <div 
+                      className="absolute top-0 left-0 h-full"
+                      style={{ backgroundColor: accentHex, width: `${duration ? (currentTime / duration) * 100 : 0}%`, boxShadow: `0 0 10px ${accentHex}88` }}
+                    />
+                  </div>
+                  <input 
+                    type="range"
+                    min={0}
+                    max={duration || 100}
+                    step="0.01"
+                    value={currentTime}
+                    onChange={(e) => {
+                      if (engine.audioElement) {
+                        const newTime = parseFloat(e.target.value);
+                        engine.audioElement.currentTime = newTime;
+                        setCurrentTime(newTime);
+                      }
+                    }}
+                    className="absolute bottom-0 left-0 w-full opacity-0 cursor-pointer h-full"
+                  />
+                </div>
+                <span className="text-[10px] tabular-nums uppercase tracking-[0.08em] shrink-0 w-[34px] text-left">{formatTime(duration)}</span>
+              </div>
+
+              {/* Row 3: 均匀分布的控件；音量点击弹出向上调节条 */}
+              <div className="w-full flex items-center justify-between text-white/60 px-0">
+                <button
+                  onClick={() => {
+                    if (isRightSidebarOpen) {
+                      setIsRightSidebarOpen(false);
+                    } else {
+                      setIsRightSidebarOpen(true);
+                      setMobileRightView('list');
+                    }
+                  }}
+                  className="hover:text-white transition-colors"
+                  title="Toggle playlist"
+                >
+                  <Menu size={18} />
+                </button>
+                <button
+                  onClick={() => setPlayMode(nextPlayMode)}
+                  className="hover:text-white transition-colors"
+                  title={playMode === 'sequence'
+                    ? t('ui.text.340', lang)
+                    : playMode === 'shuffle'
+                      ? t('ui.text.341', lang)
+                      : t('ui.text.342', lang)}
+                  style={{ color: playMode === 'sequence' ? undefined : accentHex }}
+                >
+                  {playMode === 'sequence'
+                    ? <Repeat size={16} />
+                    : playMode === 'shuffle'
+                      ? <Shuffle size={16} />
+                      : <Repeat1 size={16} />}
+                </button>
+                <button
+                  onClick={() => playFromQueue(-1)}
+                  className="hover:text-white transition-colors disabled:opacity-25 disabled:hover:text-inherit"
+                  disabled={getCurrentQueue().length === 0}
+                  title="Previous track"
+                >
+                  <SkipBack size={18} />
+                </button>
+                <button
+                  onClick={togglePlay}
+                  className="hover:text-white transition-colors disabled:opacity-25 disabled:hover:text-inherit"
+                  disabled={trackName === 'No track selected'}
+                >
+                  {isPlaying ? <Pause size={22} className="fill-current" /> : <Play size={22} className="fill-current" />}
+                </button>
+                <button
+                  onClick={() => playFromQueue(1)}
+                  className="hover:text-white transition-colors disabled:opacity-25 disabled:hover:text-inherit"
+                  disabled={getCurrentQueue().length === 0}
+                  title="Next track"
+                >
+                  <SkipForward size={18} />
+                </button>
+                <button
+                  onClick={() => setDisplaySettings(s => ({ ...s, showLyrics: !s.showLyrics }))}
+                  className="text-[13px] font-bold hover:text-white transition-colors flex items-center justify-center"
+                  title={displaySettings.showLyrics ? t('ui.text.99', lang) : t('ui.text.100', lang)}
+                  style={{ color: displaySettings.showLyrics ? accentHex : undefined }}
+                >
+                  {t('ui.text.101', lang)}
+                </button>
+                <button
+                  onClick={() => {
+                    const keys = Object.keys(themes);
+                    const themeKeys = [...keys, CUSTOM_THEME_ID];
+                    const currentIndex = themeKeys.indexOf(theme);
+                    const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % themeKeys.length : 0;
+                    onThemeChange(themeKeys[nextIndex]);
+                  }}
+                  className="hover:text-white transition-colors"
+                  title={t('ui.text.102', lang)}
+                >
+                  <Palette size={18} />
+                </button>
+                <div className="relative flex items-center justify-center">
+                  <button
+                    onClick={() => setShowMobileVolume(v => !v)}
+                    className="hover:text-white transition-colors"
+                    title="Volume"
+                  >
+                    {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+                  </button>
+                  {showMobileVolume && (
+                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 flex flex-col items-center gap-3 px-3 py-3 rounded-xl bg-black/70 backdrop-blur-md border border-white/10 shadow-lg">
+                      <button
+                        onClick={muteToggle}
+                        className="hover:text-white transition-colors"
+                        title="Mute"
+                      >
+                        {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+                      </button>
+                      <input
+                        type="range"
+                        min={0} max={1} step={0.01}
+                        value={muted ? 0 : volume}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          engine.setVolume(val);
+                          setVolume(val);
+                          if (muted && val > 0) setMuted(false);
+                          window.localStorage.setItem('sonic-volume', val.toString());
+                        }}
+                        className="vol-vertical accent-current cursor-pointer"
+                        style={{ accentColor: accentHex }}
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="flex shrink-0 items-center justify-center">
+                <CoverArt src={currentCover} title={trackName} className="h-[48px] w-[48px] shadow-[0_4px_10px_rgba(0,0,0,0.28)]" iconSize={20} />
+              </div>
+
+              <div className="player-meta flex min-w-0 shrink-0 w-[200px] flex-col justify-center">
+                <div className="truncate text-[13px] font-medium leading-5 text-white/90" title={currentSong?.name || trackName}>
+                  {currentSong?.name || trackName}
+                </div>
+                <div className="mt-1 text-[10px] leading-4 text-white/45 truncate">
+                  {currentSong?.artist || ''}
+                </div>
+              </div>
+
+              {/* Platform / source label */}
+              <div className="player-source flex shrink-0 items-center text-[10px] text-white/40 uppercase tracking-[0.14em] ml-2">
+                {songSourceLabel(currentSong)}
+              </div>
+
+              {/* Progress bar */}
+              <div className="player-progress flex-1 flex items-center gap-3">
+                 <span className="text-[10px] text-white/55 tabular-nums uppercase tracking-[0.1em] shrink-0 w-[34px] text-right">{formatTime(currentTime)}</span>
+                 <div className="relative flex-1 flex h-[12px] items-center group">
+                   <div className="w-full relative h-[2px] bg-white/10 group-hover:h-[4px] transition-all rounded-full overflow-hidden">
+                      <div
+                         className="absolute top-0 left-0 h-full"
+                         style={{ backgroundColor: accentHex, width: `${duration ? (currentTime / duration) * 100 : 0}%`, boxShadow: `0 0 10px ${accentHex}88` }}
+                       />
+                   </div>
+                   <input
+                     type="range"
+                     min={0}
+                     max={duration || 100}
+                     step="0.01"
+                     value={currentTime}
+                     onChange={(e) => {
+                       if (engine.audioElement) {
+                         const newTime = parseFloat(e.target.value);
+                         engine.audioElement.currentTime = newTime;
+                         setCurrentTime(newTime);
+                       }
+                     }}
+                     className="absolute bottom-0 left-0 w-full opacity-0 cursor-pointer h-full"
                    />
-               </div>
-               <input 
-                 type="range"
-                 min={0}
-                 max={duration || 100}
-                 step="0.01"
-                 value={currentTime}
-                 onChange={(e) => {
-                   if (engine.audioElement) {
-                     const newTime = parseFloat(e.target.value);
-                     engine.audioElement.currentTime = newTime;
-                     setCurrentTime(newTime);
-                   }
-                 }}
-                 className="absolute bottom-0 left-0 w-full opacity-0 cursor-pointer h-full"
-               />
-            </div>
-            <span className="text-[10px] text-white/55 tabular-nums uppercase tracking-[0.1em] shrink-0 w-[34px] text-left">{formatTime(duration)}</span>
-          </div>
+                </div>
+                <span className="text-[10px] text-white/55 tabular-nums uppercase tracking-[0.1em] shrink-0 w-[34px] text-left">{formatTime(duration)}</span>
+              </div>
 
-          {/* Controls */}
-          <div className="flex shrink-0 items-center justify-center gap-4 text-white/60">
-             <button
-                onClick={() => playFromQueue(-1)}
-                className="hover:text-white transition-colors disabled:opacity-25 disabled:hover:text-inherit"
-                disabled={getCurrentQueue().length === 0}
-                title="Previous track"
-              >
-                <SkipBack size={16} />
-              </button>
-              <button
-                onClick={togglePlay}
-                className="hover:text-white transition-colors disabled:opacity-25 disabled:hover:text-inherit"
-                disabled={trackName === 'No track selected'}
-              >
-                {isPlaying ? <Pause size={16} className="fill-current" /> : <Play size={16} className="fill-current" />}
-              </button>
-              <button
-                onClick={() => playFromQueue(1)}
-                className="hover:text-white transition-colors disabled:opacity-25 disabled:hover:text-inherit"
-                disabled={getCurrentQueue().length === 0}
-                title="Next track"
-              >
-                <SkipForward size={16} />
-              </button>
-              <button
-                onClick={() => setPlayMode(nextPlayMode)}
-                className="hover:text-white transition-colors"
-                title={playMode === 'sequence'
-                  ? t('ui.text.340', lang)
-                  : playMode === 'shuffle'
-                    ? t('ui.text.341', lang)
-                    : t('ui.text.342', lang)}
-                style={{ color: playMode === 'sequence' ? undefined : accentHex }}
-              >
-                {playMode === 'sequence'
-                  ? <Repeat size={14} />
-                  : playMode === 'shuffle'
-                    ? <Shuffle size={14} />
-                    : <Repeat1 size={14} />}
-              </button>
-          </div>
-
-          <div className="flex shrink-0 items-center justify-end gap-4 text-white/40 ml-2">
-            <button
-              onClick={() => setDisplaySettings(s => ({ ...s, showLyrics: !s.showLyrics }))}
-              className="text-[13px] font-bold hover:text-white transition-colors w-4 flex items-center justify-center"
-              title={displaySettings.showLyrics ? t('ui.text.99', lang) : t('ui.text.100', lang)}
-              style={{ color: displaySettings.showLyrics ? accentHex : undefined }}
-            >
-              {t('ui.text.101', lang)}</button>
-            <button 
-              onClick={() => {
-                const keys = Object.keys(themes);
-                const themeKeys = [...keys, CUSTOM_THEME_ID];
-                const currentIndex = themeKeys.indexOf(theme);
-                const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % themeKeys.length : 0;
-                onThemeChange(themeKeys[nextIndex]);
-              }}
-              className="hover:text-white transition-colors"
-              title={t('ui.text.102', lang)}
-            >
-              <Palette size={16} />
-            </button>
-            <div className="flex min-w-0 items-center justify-end gap-1.5 group">
-              <Volume2 
-                size={16} 
-                className="opacity-50 hover:opacity-100 transition-opacity cursor-pointer flex-shrink-0" 
-                onClick={() => {
-                  const val = volume > 0 ? 0 : 1;
-                  engine.setVolume(val);
-                  setVolume(val);
-                  window.localStorage.setItem('sonic-volume', val.toString());
-                }} 
-              />
-              <input 
-                type="range"
-                min={0} max={1} step={0.01}
-                value={volume}
-                onChange={(e) => {
-                  const val = parseFloat(e.target.value);
-                  engine.setVolume(val);
-                  setVolume(val);
-                  window.localStorage.setItem('sonic-volume', val.toString());
-                }}
-                className="w-12 h-1 accent-current opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer aspect-auto bg-white/20 appearance-none rounded-full"
-                style={{ accentColor: accentHex }}
-              />
-            </div>
-          </div>
+              {/* Controls */}
+              <div className="player-controls flex shrink-0 items-center justify-end gap-4 text-white/60">
+                <button
+                  onClick={() => playFromQueue(-1)}
+                  className="hover:text-white transition-colors disabled:opacity-25 disabled:hover:text-inherit"
+                  disabled={getCurrentQueue().length === 0}
+                  title="Previous track"
+                >
+                  <SkipBack size={16} />
+                </button>
+                <button
+                  onClick={togglePlay}
+                  className="hover:text-white transition-colors disabled:opacity-25 disabled:hover:text-inherit"
+                  disabled={trackName === 'No track selected'}
+                >
+                  {isPlaying ? <Pause size={16} className="fill-current" /> : <Play size={16} className="fill-current" />}
+                </button>
+                <button
+                  onClick={() => playFromQueue(1)}
+                  className="hover:text-white transition-colors disabled:opacity-25 disabled:hover:text-inherit"
+                  disabled={getCurrentQueue().length === 0}
+                  title="Next track"
+                >
+                  <SkipForward size={16} />
+                </button>
+                <button
+                  onClick={() => setPlayMode(nextPlayMode)}
+                  className="hover:text-white transition-colors"
+                  title={playMode === 'sequence'
+                    ? t('ui.text.340', lang)
+                    : playMode === 'shuffle'
+                      ? t('ui.text.341', lang)
+                      : t('ui.text.342', lang)}
+                  style={{ color: playMode === 'sequence' ? undefined : accentHex }}
+                >
+                  {playMode === 'sequence'
+                    ? <Repeat size={14} />
+                    : playMode === 'shuffle'
+                      ? <Shuffle size={14} />
+                      : <Repeat1 size={14} />}
+                </button>
+                <button
+                  onClick={() => setDisplaySettings(s => ({ ...s, showLyrics: !s.showLyrics }))}
+                  className="text-[13px] font-bold hover:text-white transition-colors w-4 flex items-center justify-center"
+                  title={displaySettings.showLyrics ? t('ui.text.99', lang) : t('ui.text.100', lang)}
+                  style={{ color: displaySettings.showLyrics ? accentHex : undefined }}
+                >
+                  {t('ui.text.101', lang)}
+                </button>
+                <button
+                  onClick={() => {
+                    const keys = Object.keys(themes);
+                    const themeKeys = [...keys, CUSTOM_THEME_ID];
+                    const currentIndex = themeKeys.indexOf(theme);
+                    const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % themeKeys.length : 0;
+                    onThemeChange(themeKeys[nextIndex]);
+                  }}
+                  className="hover:text-white transition-colors"
+                  title={t('ui.text.102', lang)}
+                >
+                  <Palette size={16} />
+                </button>
+                <div className="flex min-w-0 items-center justify-end gap-1.5 group">
+                  <Volume2
+                    size={16}
+                    className="opacity-50 hover:opacity-100 transition-opacity cursor-pointer flex-shrink-0"
+                    onClick={() => {
+                      const val = volume > 0 ? 0 : 1;
+                      engine.setVolume(val);
+                      setVolume(val);
+                      window.localStorage.setItem('sonic-volume', val.toString());
+                    }}
+                  />
+                  <input
+                    type="range"
+                    min={0} max={1} step={0.01}
+                    value={volume}
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value);
+                      engine.setVolume(val);
+                      setVolume(val);
+                      window.localStorage.setItem('sonic-volume', val.toString());
+                    }}
+                    className="w-12 h-1 accent-current opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer aspect-auto bg-white/20 appearance-none rounded-full"
+                    style={{ accentColor: accentHex }}
+                  />
+                </div>
+              </div>
+            </>
+          )}
           </div>
         </div>
       {/* Clock Display */}
@@ -2570,23 +2312,6 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
         <OptionsPanel
           onClose={() => setShowOptionsPanel(false)}
           accentHex={accentHex}
-          neteaseCookie={neteaseCookie}
-          setNeteaseCookie={setNeteaseCookie}
-          onSaveCookie={saveNeteaseCookie}
-          onClearCookie={clearNeteaseCookie}
-          cookieStatus={cookieStatus}
-          isNeteaseCookieValid={isNeteaseCookieValid}
-          isSyncingNeteaseCookie={isSyncingNeteaseCookie}
-          qqCookie={qqCookie}
-          setQQCookie={setQQCookie}
-          onSaveQQCookie={saveQQCookie}
-          onClearQQCookie={clearQQCookie}
-          qqCookieStatus={qqCookieStatus}
-          isQQCookieValid={isQQCookieValid}
-          isSyncingQQCookie={isSyncingQQCookie}
-          desktopLoginStatus={desktopLoginStatus}
-          onDesktopNeteaseLogin={startDesktopNeteaseLogin}
-          onDesktopQQLogin={startDesktopQQLogin}
           updateStatus={updateStatus}
           isCheckingUpdate={isCheckingUpdate}
           onCheckUpdate={() => checkForUpdate({ manual: true })}
@@ -2620,99 +2345,11 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
 import { TriggerPreset } from '../../lib/AudioEngine';
 
 function DesktopTitleDragRegion() {
-    const lang = useLanguage();
-  const isDraggingWindow = useRef(false);
-  const dragFrame = useRef<number | null>(null);
-
-  const pointFromEvent = (event: React.PointerEvent<HTMLDivElement> | PointerEvent) => ({
-    screenX: event.screenX,
-    screenY: event.screenY,
-  });
-
-  const endDrag = () => {
-    if (!isDraggingWindow.current) return;
-    isDraggingWindow.current = false;
-    if (dragFrame.current != null) {
-      window.cancelAnimationFrame(dragFrame.current);
-      dragFrame.current = null;
-    }
-    window.sonicDesktop?.endWindowDrag();
-    window.removeEventListener('pointermove', handleWindowPointerMove);
-    window.removeEventListener('pointerup', handleWindowPointerUp);
-    window.removeEventListener('blur', endDrag);
-  };
-
-  const handleWindowPointerMove = (event: PointerEvent) => {
-    if (!isDraggingWindow.current) return;
-    event.preventDefault();
-    const point = pointFromEvent(event);
-    if (dragFrame.current != null) window.cancelAnimationFrame(dragFrame.current);
-    dragFrame.current = window.requestAnimationFrame(() => {
-      window.sonicDesktop?.moveWindowDrag(point);
-      dragFrame.current = null;
-    });
-  };
-
-  const handleWindowPointerUp = () => {
-    endDrag();
-  };
-
-  const startDrag = async (event: React.PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    isDraggingWindow.current = true;
-    window.sonicDesktop?.startWindowDrag(pointFromEvent(event));
-    window.addEventListener('pointermove', handleWindowPointerMove);
-    window.addEventListener('pointerup', handleWindowPointerUp);
-    window.addEventListener('blur', endDrag);
-  };
-
-  if (!window.sonicDesktop?.isDesktop) return null;
-
-  return (
-    <div
-      className="desktop-no-drag pointer-events-auto absolute inset-x-0 top-0 z-[20] h-12 cursor-default"
-      style={{ backgroundColor: 'rgba(255, 255, 255, 0.001)' }}
-      onPointerDown={startDrag}
-      aria-hidden="true"
-    />
-  );
+  return null;
 }
 
 function DesktopWindowControls() {
-    const lang = useLanguage();
-  if (!window.sonicDesktop?.isDesktop) return null;
-
-  return (
-    <div className="desktop-no-drag group/window-controls pointer-events-auto absolute right-0 top-0 z-[300] flex h-16 w-44 items-start justify-end pr-5 pt-4">
-      <div className="flex translate-y-[-2px] items-center gap-2 opacity-0 transition-all duration-200 ease-out group-hover/window-controls:translate-y-0 group-hover/window-controls:opacity-100">
-        <button
-          type="button"
-          onClick={() => window.sonicDesktop?.minimize()}
-          className="grid h-8 w-8 place-items-center rounded-full border border-white/10 bg-black/35 text-white/55 shadow-[0_10px_30px_rgba(0,0,0,0.35)] backdrop-blur-md hover:text-white"
-          title={t('ui.text.103', lang)}
-        >
-          <Minus size={14} />
-        </button>
-        <button
-          type="button"
-          onClick={() => window.sonicDesktop?.toggleMaximize()}
-          className="grid h-8 w-8 place-items-center rounded-full border border-white/10 bg-black/35 text-white/55 shadow-[0_10px_30px_rgba(0,0,0,0.35)] backdrop-blur-md hover:text-white"
-          title={t('ui.text.104', lang)}
-        >
-          <Square size={12} />
-        </button>
-        <button
-          type="button"
-          onClick={() => window.sonicDesktop?.close()}
-          className="grid h-8 w-8 place-items-center rounded-full border border-white/10 bg-black/35 text-white/55 shadow-[0_10px_30px_rgba(0,0,0,0.35)] backdrop-blur-md hover:border-[#ef4444]/50 hover:text-[#ef4444]"
-          title={t('ui.text.105', lang)}
-        >
-          <X size={14} />
-        </button>
-      </div>
-    </div>
-  );
+  return null;
 }
 
 function NeteaseSongList({
@@ -2777,23 +2414,6 @@ function NeteaseSongList({
 function OptionsPanel({
   onClose,
   accentHex,
-  neteaseCookie,
-  setNeteaseCookie,
-  onSaveCookie,
-  onClearCookie,
-  cookieStatus,
-  isNeteaseCookieValid,
-  isSyncingNeteaseCookie,
-  qqCookie,
-  setQQCookie,
-  onSaveQQCookie,
-  onClearQQCookie,
-  qqCookieStatus,
-  isQQCookieValid,
-  isSyncingQQCookie,
-  desktopLoginStatus,
-  onDesktopNeteaseLogin,
-  onDesktopQQLogin,
   updateStatus,
   isCheckingUpdate,
   onCheckUpdate,
@@ -2820,23 +2440,6 @@ function OptionsPanel({
 }: {
   onClose: () => void;
   accentHex: string;
-  neteaseCookie: string;
-  setNeteaseCookie: (cookie: string) => void;
-  onSaveCookie: () => void | Promise<void>;
-  onClearCookie: () => void | Promise<void>;
-  cookieStatus: string;
-  isNeteaseCookieValid: boolean;
-  isSyncingNeteaseCookie: boolean;
-  qqCookie: string;
-  setQQCookie: (cookie: string) => void;
-  onSaveQQCookie: () => void | Promise<void>;
-  onClearQQCookie: () => void | Promise<void>;
-  qqCookieStatus: string;
-  isQQCookieValid: boolean;
-  isSyncingQQCookie: boolean;
-  desktopLoginStatus: string;
-  onDesktopNeteaseLogin: () => void | Promise<void>;
-  onDesktopQQLogin: () => void | Promise<void>;
   updateStatus: string;
   isCheckingUpdate: boolean;
   onCheckUpdate: () => void | Promise<void>;
@@ -2871,7 +2474,6 @@ function OptionsPanel({
     Meteor: t('ui.text.110', lang),
     GroundEq: t('ui.text.111', lang),
     Color: t('ui.text.112', lang),
-    Account: t('ui.text.113', lang),
     Lyrics: t('ui.text.114', lang),
     Display: t('ui.text.115', lang),
   };
@@ -2920,9 +2522,9 @@ function OptionsPanel({
   };
 
   return (
-    <div className="absolute top-[40px] left-[100px] z-[100] pointer-events-auto">
+    <div className="sonic-panel absolute top-[40px] left-[100px] z-[100] pointer-events-auto">
        <div
-         className="themed-scrollbar w-[min(840px,calc(100vw-140px))] max-h-[86vh] overflow-y-auto border rounded-sm p-8 transform transition-all shadow-2xl"
+         className="themed-scrollbar sonic-panel-body w-[min(840px,calc(100vw-140px))] max-h-[86vh] overflow-y-auto border rounded-sm p-8 transform transition-all shadow-2xl"
          style={themedPanelStyle(accentHex, 0.88)}
        >
           <div className="flex justify-between items-center mb-6">
@@ -2974,7 +2576,7 @@ function OptionsPanel({
             {presetTransferStatus && <div className="mt-3 text-[11px] text-white/45">{presetTransferStatus}</div>}
           </div>
 
-          <div className="flex gap-2 mb-6">
+          <div className="sonic-tabs flex gap-2 mb-6">
             {tabs.map((tab) => (
                <button
                   key={tab}
@@ -3019,29 +2621,7 @@ function OptionsPanel({
               onSettingsChange={onPlaybackQualitySettingsChange}
             />
           ) : activeTab === 'Account' ? (
-            <AccountLoginPanel
-              accentHex={accentHex}
-              neteaseCookie={neteaseCookie}
-              setNeteaseCookie={setNeteaseCookie}
-              onSaveCookie={onSaveCookie}
-              onClearCookie={onClearCookie}
-              cookieStatus={cookieStatus}
-              isNeteaseCookieValid={isNeteaseCookieValid}
-              isSyncingNeteaseCookie={isSyncingNeteaseCookie}
-              qqCookie={qqCookie}
-              setQQCookie={setQQCookie}
-              onSaveQQCookie={onSaveQQCookie}
-              onClearQQCookie={onClearQQCookie}
-              qqCookieStatus={qqCookieStatus}
-              isQQCookieValid={isQQCookieValid}
-              isSyncingQQCookie={isSyncingQQCookie}
-              desktopLoginStatus={desktopLoginStatus}
-              onDesktopNeteaseLogin={onDesktopNeteaseLogin}
-              onDesktopQQLogin={onDesktopQQLogin}
-              updateStatus={updateStatus}
-              isCheckingUpdate={isCheckingUpdate}
-              onCheckUpdate={onCheckUpdate}
-            />
+            <MetingConfigPanel accentHex={accentHex} />
           ) : activeTab === 'Lyrics' ? (
             <div className="flex flex-col gap-6">
               <div className="bg-white/[0.02] border border-white/5 rounded-sm p-4 flex flex-col gap-5">
@@ -3072,7 +2652,7 @@ function OptionsPanel({
                 {(lyricsSettings.style === 'dynamic-bounce' || lyricsSettings.style === 'spatial-wall') && (
                    <>
                       <div className="h-[1px] bg-white/5 w-full"></div>
-                      <div className="grid grid-cols-2 gap-8">
+                      <div className="sonic-stack-mobile grid grid-cols-2 gap-8">
                         <div>
                            <div className="text-[12px] uppercase tracking-[0.15em] text-white/70 mb-3">{t('ui.text.135', lang)}</div>
                            <select
@@ -3165,7 +2745,7 @@ function OptionsPanel({
 
                 <div className="h-[1px] bg-white/5 w-full"></div>
 
-                <div className="grid grid-cols-3 gap-8">
+                <div className="sonic-stack-mobile grid grid-cols-3 gap-8">
                    <div>
                       <div className="text-[12px] uppercase tracking-[0.15em] text-white/70 mb-3">{t('ui.text.158', lang)}</div>
                       <div className="flex items-center gap-3">
@@ -3259,7 +2839,7 @@ function OptionsPanel({
               <div className="bg-white/[0.02] border border-white/5 rounded-sm p-4 flex flex-col gap-5">
                 <div>
                   <div className="text-[12px] uppercase tracking-[0.15em] text-white/70 mb-3">{t('ui.text.168', lang)}</div>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="sonic-stack-mobile grid grid-cols-2 gap-4">
                     <label className="flex items-center gap-2 text-[11px] uppercase tracking-widest text-white/50 cursor-pointer hover:text-white transition-colors">
                       <input type="checkbox" checked={displaySettings.showLeftIcon} onChange={(e) => onDisplaySettingsChange(s => ({ ...s, showLeftIcon: e.target.checked }))} className="w-3 h-3" style={{ accentColor: accentHex }} />
                       {t('ui.text.169', lang)}</label>
@@ -3392,7 +2972,7 @@ function OptionsPanel({
                 
                 <div className="opacity-100 transition-opacity" style={{ opacity: displaySettings.clock.visible ? 1 : 0.4, pointerEvents: displaySettings.clock.visible ? 'auto' : 'none' }}>
                   <div className="text-[10px] uppercase tracking-[0.15em] text-white/50 mb-2">{t('ui.text.187', lang)}</div>
-                  <div className="grid grid-cols-3 gap-2 mb-4">
+                  <div className="sonic-stack-mobile grid grid-cols-3 gap-2 mb-4">
                     {['top-left', 'top-center', 'top-right', 'center-left', 'center', 'center-right', 'bottom-left', 'bottom-center', 'bottom-right'].map(pos => (
                       <button
                         key={pos}
@@ -4458,167 +4038,107 @@ function UpdatePromptModal({
   );
 }
 
-function AccountLoginPanel({
-  accentHex,
-  neteaseCookie,
-  setNeteaseCookie,
-  onSaveCookie,
-  onClearCookie,
-  cookieStatus,
-  isNeteaseCookieValid,
-  isSyncingNeteaseCookie,
-  qqCookie,
-  setQQCookie,
-  onSaveQQCookie,
-  onClearQQCookie,
-  qqCookieStatus,
-  isQQCookieValid,
-  isSyncingQQCookie,
-  desktopLoginStatus,
-  onDesktopNeteaseLogin,
-  onDesktopQQLogin,
-  updateStatus,
-  isCheckingUpdate,
-  onCheckUpdate,
-}: {
-  accentHex: string;
-  neteaseCookie: string;
-  setNeteaseCookie: (cookie: string) => void;
-  onSaveCookie: () => void | Promise<void>;
-  onClearCookie: () => void | Promise<void>;
-  cookieStatus: string;
-  isNeteaseCookieValid: boolean;
-  isSyncingNeteaseCookie: boolean;
-  qqCookie: string;
-  setQQCookie: (cookie: string) => void;
-  onSaveQQCookie: () => void | Promise<void>;
-  onClearQQCookie: () => void | Promise<void>;
-  qqCookieStatus: string;
-  isQQCookieValid: boolean;
-  isSyncingQQCookie: boolean;
-  desktopLoginStatus: string;
-  onDesktopNeteaseLogin: () => void | Promise<void>;
-  onDesktopQQLogin: () => void | Promise<void>;
-  updateStatus: string;
-  isCheckingUpdate: boolean;
-  onCheckUpdate: () => void | Promise<void>;
-}) {
-    const lang = useLanguage();
-  const [provider, setProvider] = useState<'netease' | 'qq'>('netease');
-  const isDesktop = Boolean(window.sonicDesktop?.isDesktop);
-  const activeValid = provider === 'netease' ? isNeteaseCookieValid : isQQCookieValid;
-  const activeStatus = provider === 'netease' ? cookieStatus : qqCookieStatus;
-  const isSyncing = provider === 'netease' ? isSyncingNeteaseCookie : isSyncingQQCookie;
+function MetingConfigPanel({ accentHex }: { accentHex: string }) {
+  const lang = useLanguage();
+  const [base, setBase] = useState('');
+  const [resolved, setResolved] = useState('');
+  const [server, setServer] = useState<MetingServer>(getMetingServer());
+  const [bitrate, setBitrate] = useState(getMetingBitrate());
+  const [status, setStatus] = useState('');
+
+  const refreshResolved = async () => {
+    const b = await resolveMetingBase(true);
+    setResolved(b);
+  };
+
+  useEffect(() => {
+    refreshResolved();
+  }, []);
+
+  useEffect(() => {
+    setMetingServer(server);
+  }, [server]);
+
+  useEffect(() => {
+    setMetingBitrate(bitrate);
+  }, [bitrate]);
+
+  const onSave = async () => {
+    setMetingBase(base);
+    setMetingServer(server);
+    setMetingBitrate(bitrate);
+    await refreshResolved();
+    setStatus(base.trim()
+      ? '已保存 Meting 接口地址。'
+      : '已清除自定义地址，将回退到站点内的 meting-config.json 或构建变量 VITE_METING_API。');
+  };
+
+  const onTest = async () => {
+    const b = await resolveMetingBase(true);
+    if (!b) {
+      setStatus('未配置接口地址，请先填写并保存。');
+      return;
+    }
+    try {
+      const res = await fetch(`${b}?server=${server}&type=search&id=test`);
+      setStatus(`接口返回 HTTP ${res.status}。`);
+    } catch (err) {
+      setStatus(`接口请求失败：${(err as Error)?.message || '请检查地址与 CORS'}`);
+    }
+  };
 
   return (
-    <div className="grid gap-5">
-      <div className="rounded-[18px] border border-white/10 bg-white/[0.04] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
-        <div className="grid grid-cols-2 gap-1">
-          {[
-            { id: 'netease' as const, label: t('ui.text.309', lang) },
-            { id: 'qq' as const, label: t('ui.text.310', lang) },
-          ].map((item) => (
-            <button
-              key={item.id}
-              onClick={() => setProvider(item.id)}
-              className={`rounded-[14px] px-4 py-2 text-[12px] font-semibold tracking-[0.08em] transition-colors ${
-                provider === item.id ? 'text-white' : 'text-white/42 hover:text-white/70'
-              }`}
-              style={{ background: provider === item.id ? `${accentHex}42` : 'transparent' }}
-            >
-              {item.label}
-            </button>
-          ))}
+    <div className="rounded-[16px] border border-white/10 bg-white/[0.03] p-4 grid gap-4">
+      <div className="text-[12px] uppercase tracking-[0.18em] text-white/65">Meting 接口</div>
+      <div className="text-[11px] leading-relaxed text-white/45">
+        配置你自己部署的 Meting API 地址（初叶 Meting：/?server=&amp;type=&amp;id=）。该实例 type=url 会 302 跳转到真实音频、type=lrc 直接返回文本歌词，且不支持 br 码率参数。留空则回退到站点内的 meting-config.json 或构建变量 VITE_METING_API。
+      </div>
+      <div className="flex flex-col gap-1">
+        <span className="text-[11px] text-white/55">接口地址（Base URL）</span>
+        <input
+          value={base}
+          onChange={(e) => setBase(e.target.value)}
+          placeholder="https://meting.yufish.cn/api"
+          spellCheck={false}
+          className="min-h-[40px] rounded-[12px] border bg-white/[0.035] px-3 py-2 font-mono text-[12px] text-white outline-none focus:border-white/30"
+          style={{ borderColor: colorWithAlpha(accentHex, 0.16) }}
+        />
+        {resolved && (
+          <span className="text-[10px] text-white/35">当前生效地址：{resolved}</span>
+        )}
+      </div>
+      <div className="sonic-stack-mobile grid grid-cols-2 gap-3">
+        <div className="flex flex-col gap-1">
+          <span className="text-[11px] text-white/55">默认音源</span>
+          <select
+            value={server}
+            onChange={(e) => setServer(e.target.value as MetingServer)}
+            className="rounded-[12px] border bg-white/[0.035] px-3 py-2 text-[12px] text-white outline-none focus:border-white/30"
+            style={{ borderColor: colorWithAlpha(accentHex, 0.16) }}
+          >
+            {['tencent', 'kugou', 'netease'].map((s) => (
+              <option key={s} value={s} className="bg-[#0b0f14] text-white">{s}</option>
+            ))}
+          </select>
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="text-[11px] text-white/55">默认码率</span>
+          <select
+            value={bitrate}
+            onChange={(e) => setBitrate(e.target.value)}
+            className="rounded-[12px] border bg-white/[0.035] px-3 py-2 text-[12px] text-white outline-none focus:border-white/30"
+            style={{ borderColor: colorWithAlpha(accentHex, 0.16) }}
+          >
+            {['128', '192', '320', 'flac', '999'].map((b) => (
+              <option key={b} value={b} className="bg-[#0b0f14] text-white">{b}</option>
+            ))}
+          </select>
         </div>
       </div>
-
-      <div className="rounded-[18px] border border-white/10 bg-white/[0.035] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
-        <div className="mb-4 rounded-[14px] border p-4" style={{ borderColor: colorWithAlpha(accentHex, 0.16), background: `linear-gradient(135deg, ${colorWithAlpha(accentHex, 0.10)}, rgba(255,255,255,0.02))` }}>
-          <div className="text-[10px] uppercase tracking-[0.18em] text-white/45">Sonic Topography</div>
-          <div className="mt-2 text-[20px] font-semibold tracking-[0.02em] text-white">{t('ui.text.311', lang)}</div>
-          <div className="mt-2 max-w-[58ch] text-[12px] leading-relaxed text-white/52">
-            {t('ui.text.312', lang)}</div>
-        </div>
-
-        <div className="grid place-items-center py-4">
-          <div className="grid h-[184px] w-[184px] place-items-center rounded-[20px] border text-center" style={{ borderColor: colorWithAlpha(accentHex, 0.22), backgroundColor: colorWithAlpha(accentHex, 0.06) }}>
-            <div>
-              <div className="text-[26px] font-semibold tracking-[0.12em]" style={{ color: accentHex }}>
-                {provider === 'netease' ? 'NE' : 'QQ'}
-              </div>
-              <div className="mt-2 text-[11px] text-white/38">
-                {activeValid ? t('ui.text.313', lang) : t('ui.text.314', lang)}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="text-center text-[12px] leading-relaxed text-white/55">
-          {isSyncing ? t('ui.text.315', lang) : (desktopLoginStatus || activeStatus || (activeValid ? t('ui.text.316', lang) : `扫码登录${provider === 'netease' ? t('ui.text.317', lang) : t('ui.text.318', lang)}`))}
-        </div>
-
-        <div className="mt-4 flex flex-wrap justify-center gap-2">
-          <button
-            onClick={provider === 'netease' ? onClearCookie : onClearQQCookie}
-            className="rounded-[10px] border border-white/10 px-4 py-2 text-[11px] tracking-[0.08em] text-white/55 hover:text-white"
-          >
-            {t('ui.text.319', lang)}</button>
-          <button
-            onClick={provider === 'netease' ? onDesktopNeteaseLogin : onDesktopQQLogin}
-            disabled={!isDesktop}
-            className="rounded-[10px] border px-4 py-2 text-[11px] font-semibold tracking-[0.08em] disabled:opacity-40"
-            style={primaryGhostStyle(accentHex)}
-          >
-            {isDesktop ? t('ui.text.320', lang) : t('ui.text.321', lang)}
-          </button>
-        </div>
-      </div>
-
-      {!isDesktop && (
-        <div className="grid gap-3 rounded-[16px] border bg-white/[0.025] p-4" style={{ borderColor: colorWithAlpha(accentHex, 0.16) }}>
-          <div className="text-[12px] uppercase tracking-[0.18em] text-white/60">{t('ui.text.322', lang)}</div>
-          {provider === 'netease' ? (
-            <>
-              <textarea
-                value={neteaseCookie}
-                onChange={(e) => setNeteaseCookie(e.target.value)}
-                spellCheck={false}
-                placeholder="MUSIC_U=...; __csrf=...; NMTID=..."
-                className="min-h-[120px] resize-y rounded-[12px] border bg-white/[0.035] px-3 py-3 font-mono text-[12px] leading-relaxed text-white outline-none focus:border-white/30"
-                style={{ borderColor: colorWithAlpha(accentHex, 0.16) }}
-              />
-              <button onClick={onSaveCookie} className="w-fit rounded-[10px] border px-4 py-2 text-[11px]" style={primaryGhostStyle(accentHex)}>{t('ui.text.323', lang)}</button>
-            </>
-          ) : (
-            <>
-              <textarea
-                value={qqCookie}
-                onChange={(e) => setQQCookie(e.target.value)}
-                spellCheck={false}
-                placeholder="uin=...; qm_keyst=...; qqmusic_key=..."
-                className="min-h-[120px] resize-y rounded-[12px] border bg-white/[0.035] px-3 py-3 font-mono text-[12px] leading-relaxed text-white outline-none focus:border-white/30"
-                style={{ borderColor: colorWithAlpha(accentHex, 0.16) }}
-              />
-              <button onClick={onSaveQQCookie} className="w-fit rounded-[10px] border px-4 py-2 text-[11px]" style={primaryGhostStyle(accentHex)}>{t('ui.text.324', lang)}</button>
-            </>
-          )}
-        </div>
-      )}
-
-      <div className="rounded-[16px] border border-white/10 bg-white/[0.03] p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <div className="text-[12px] uppercase tracking-[0.18em] text-white/65">{t('ui.text.325', lang)}</div>
-            <div className="mt-1 text-[11px] text-white/40">{updateStatus || t('ui.text.326', lang)}</div>
-          </div>
-          <button
-            onClick={onCheckUpdate}
-            disabled={isCheckingUpdate}
-            className="rounded-[10px] border border-white/10 px-4 py-2 text-[11px] tracking-[0.08em] text-white/60 hover:text-white disabled:opacity-40"
-          >
-            {isCheckingUpdate ? t('ui.text.327', lang) : t('ui.text.328', lang)}
-          </button>
-        </div>
+      {status && <div className="text-[11px] leading-relaxed text-white/45">{status}</div>}
+      <div className="flex gap-2">
+        <button onClick={onSave} className="rounded-[10px] border px-4 py-2 text-[11px]" style={primaryGhostStyle(accentHex)}>保存</button>
+        <button onClick={onTest} className="rounded-[10px] border border-white/10 px-4 py-2 text-[11px] text-white/60 hover:text-white">测试</button>
       </div>
     </div>
   );
@@ -4859,7 +4379,7 @@ function FreqTriggerPanel({ action, accentHex }: { action: 'Pulse' | 'Meteor', a
           </div>
 
           {mode === 'Auto Beat' && (
-            <div className="mt-8 grid grid-cols-2 gap-6">
+            <div className="sonic-stack-mobile mt-8 grid grid-cols-2 gap-6">
                <div className="flex flex-col gap-2">
                  <div className="flex justify-between uppercase tracking-widest text-[10px] text-white/50">
                     <span>{t('ui.text.336', lang)}</span>

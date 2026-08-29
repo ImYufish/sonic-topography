@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { getSiteConfig } from './siteConfig';
 
 export interface CustomThemeSettings {
   id: string;
@@ -48,7 +49,7 @@ export const BUILT_IN_THEME_IDS = [
   'wine-signal',
   'daybreak-lime',
 ];
-export const DEFAULT_THEME_ID = 'minimal-monochrome';
+export const DEFAULT_THEME_ID = 'wine-signal';
 export const CUSTOM_THEME_STORAGE_KEY = 'sonic-topography-custom-themes-v2';
 export const LEGACY_CUSTOM_THEME_STORAGE_KEY = 'sonic-topography-custom-theme-v1';
 export const ACTIVE_CUSTOM_THEME_STORAGE_KEY = 'sonic-topography-active-custom-theme-v1';
@@ -148,14 +149,19 @@ export function readCustomThemeStorage(): CustomThemeSettings[] {
     if (Array.isArray(parsed) && parsed.length > 0) {
       return parsed.map((preset) => normalizeCustomThemeSettings(preset));
     }
-
-    const legacyRaw = window.localStorage.getItem(LEGACY_CUSTOM_THEME_STORAGE_KEY);
-    const legacyPreset = legacyRaw ? normalizeCustomThemeSettings(JSON.parse(legacyRaw)) : defaultCustomThemeSettings;
-    return [legacyPreset];
   } catch (error) {
     console.warn('Unable to read custom theme settings:', error);
-    return [defaultCustomThemeSettings];
   }
+
+  // localStorage 无自定义主题：回退站点配置（public/site-config.json5 的 customThemes）。
+  const siteThemes = getSiteConfig()?.customThemes;
+  if (Array.isArray(siteThemes) && siteThemes.length > 0) {
+    return siteThemes.map((preset) => normalizeCustomThemeSettings(preset));
+  }
+
+  const legacyRaw = window.localStorage.getItem(LEGACY_CUSTOM_THEME_STORAGE_KEY);
+  const legacyPreset = legacyRaw ? normalizeCustomThemeSettings(JSON.parse(legacyRaw)) : defaultCustomThemeSettings;
+  return [legacyPreset];
 }
 
 export function writeCustomThemeStorage(settings: CustomThemeSettings[]) {
@@ -167,7 +173,13 @@ export function readActiveCustomThemeStorage(presets: CustomThemeSettings[]) {
   if (typeof window === 'undefined') return presets[0]?.id || defaultCustomThemeSettings.id;
 
   const stored = window.localStorage.getItem(ACTIVE_CUSTOM_THEME_STORAGE_KEY) || '';
-  return presets.some((preset) => preset.id === stored) ? stored : (presets[0]?.id || defaultCustomThemeSettings.id);
+  if (presets.some((preset) => preset.id === stored)) return stored;
+
+  // 回退站点配置（仅当该 id 确实存在于当前预置列表中时生效）。
+  const siteId = getSiteConfig()?.activeCustomThemeId;
+  if (siteId && presets.some((preset) => preset.id === siteId)) return siteId;
+
+  return presets[0]?.id || defaultCustomThemeSettings.id;
 }
 
 export function writeActiveCustomThemeStorage(presetId: string) {
@@ -179,7 +191,13 @@ export function readActiveThemeStorage() {
   if (typeof window === 'undefined') return DEFAULT_THEME_ID;
 
   const stored = window.localStorage.getItem(ACTIVE_THEME_STORAGE_KEY) || '';
-  return stored === CUSTOM_THEME_ID || BUILT_IN_THEME_IDS.includes(stored) ? stored : DEFAULT_THEME_ID;
+  if (stored === CUSTOM_THEME_ID || BUILT_IN_THEME_IDS.includes(stored)) return stored;
+
+  // 回退站点配置（public/site-config.json5 的 theme）。
+  const site = getSiteConfig()?.theme;
+  if (site === CUSTOM_THEME_ID || (site && BUILT_IN_THEME_IDS.includes(site))) return site;
+
+  return DEFAULT_THEME_ID;
 }
 
 export function writeActiveThemeStorage(themeId: string) {
@@ -209,11 +227,18 @@ export function readThemeRotationStorage(availableThemeIds: string[]) {
 
   try {
     const raw = window.localStorage.getItem(THEME_ROTATION_STORAGE_KEY);
-    return normalizeThemeRotationSettings(raw ? JSON.parse(raw) : defaultThemeRotationSettings, availableThemeIds);
+    if (raw) return normalizeThemeRotationSettings(JSON.parse(raw), availableThemeIds);
   } catch (error) {
     console.warn('Unable to read theme rotation settings:', error);
-    return normalizeThemeRotationSettings(defaultThemeRotationSettings, availableThemeIds);
   }
+
+  // 回退站点配置（public/site-config.json5 的 themeRotation）。
+  const siteRotation = getSiteConfig()?.themeRotation;
+  if (siteRotation && typeof siteRotation === 'object') {
+    return normalizeThemeRotationSettings(siteRotation, availableThemeIds);
+  }
+
+  return normalizeThemeRotationSettings(defaultThemeRotationSettings, availableThemeIds);
 }
 
 export function writeThemeRotationStorage(settings: ThemeRotationSettings, availableThemeIds: string[]) {

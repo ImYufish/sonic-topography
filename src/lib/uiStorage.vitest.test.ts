@@ -34,8 +34,10 @@ describe('UI storage compatibility', () => {
   });
 
   it('preserves provider defaults and QQ selection', () => {
-    expect(readSearchProviderStorage()).toBe('netease');
+    expect(readSearchProviderStorage()).toBe('meting');
     writeSearchProviderStorage('qq');
     expect(readSearchProviderStorage()).toBe('qq');
+    writeSearchProviderStorage('netease');
+    expect(readSearchProviderStorage()).toBe('netease');
   });
 });

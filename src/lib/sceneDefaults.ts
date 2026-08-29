@@ -1,3 +1,5 @@
+import { getSiteConfig } from './siteConfig';
+
 export const GLOBAL_SCENE_SETTINGS_STORAGE_KEY = 'sonic_topo_global_scene_settings';
 export const CAMERA_STATE_STORAGE_KEY = 'sonic_camera_state';
 
@@ -65,9 +67,14 @@ export function readGlobalSceneSettingsStorage(): GlobalSceneSettings {
 
   try {
     const saved = localStorage.getItem(GLOBAL_SCENE_SETTINGS_STORAGE_KEY);
-    return normalizeGlobalSceneSettings(saved ? JSON.parse(saved) : undefined);
+    if (saved) return normalizeGlobalSceneSettings(JSON.parse(saved));
   } catch (error) {
     console.error('Failed to read global scene settings from storage', error);
-    return DEFAULT_GLOBAL_SCENE_SETTINGS;
   }
+
+  // 回退站点配置（public/site-config.json5 的 globalSceneSettings）。
+  const site = getSiteConfig()?.globalSceneSettings;
+  if (site && typeof site === 'object') return normalizeGlobalSceneSettings(site);
+
+  return DEFAULT_GLOBAL_SCENE_SETTINGS;
 }

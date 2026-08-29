@@ -26,7 +26,8 @@ import {
   type CustomThemeSettings,
   type ThemeRotationSettings,
 } from './lib/themes';
-import { readLyricsSettingsStorage, writeLyricsSettingsStorage, type LyricsSettings } from './lib/lyricsSettings';
+import { readLyricsSettingsStorage, writeLyricsSettingsStorage, STORAGE_KEY as LYRICS_SETTINGS_STORAGE_KEY, type LyricsSettings } from './lib/lyricsSettings';
+import { getSiteConfig } from './lib/siteConfig';
 
 function readInitialCustomThemeState() {
   const presets = readCustomThemeStorage();
@@ -45,7 +46,23 @@ export default function App() {
   const activeCustomTheme = customThemes.find((preset) => preset.id === activeCustomThemeId) || customThemes[0];
   const availableRotationThemeIds = [...BUILT_IN_THEME_IDS, ...customThemes.map((preset) => preset.id)];
   const [themeRotation, setThemeRotation] = useState<ThemeRotationSettings>(() => readThemeRotationStorage(availableRotationThemeIds));
-  const [lyricsSettings, setLyricsSettings] = useState<LyricsSettings>(readLyricsSettingsStorage);
+  const [lyricsSettings, setLyricsSettings] = useState<LyricsSettings>(() => {
+    const stored = readLyricsSettingsStorage();
+    // 手机端默认 3D 环绕歌词（spatial-wall）：仅在用户尚未在本地存储自定义过歌词样式时生效，
+    // 已自定义则尊重其选择；桌面端保持原有默认。
+    const isMobileInit =
+      typeof window !== 'undefined' &&
+      window.matchMedia('(max-width: 768px), (pointer: coarse)').matches;
+    const hasCustom =
+      typeof window !== 'undefined' &&
+      window.localStorage.getItem(LYRICS_SETTINGS_STORAGE_KEY) != null;
+    if (isMobileInit && !hasCustom) {
+      // 移动端默认歌词样式取站点配置（site-config.json5 的 mobile.lyricsStyle），缺省 spatial-wall。
+      const mobileLyricsStyle = getSiteConfig()?.mobile?.lyricsStyle ?? 'spatial-wall';
+      return { ...stored, style: mobileLyricsStyle };
+    }
+    return stored;
+  });
   const [showDebugger, setShowDebugger] = useState(false);
   const [currentLyricsText, setCurrentLyricsText] = useState('');
   const [lyricsVisible, setLyricsVisible] = useState(true);
@@ -170,7 +187,7 @@ export default function App() {
         onResetCamera={() => setResetCameraTrigger(prev => prev + 1)}
       />
       <div className="absolute inset-0 z-0">
-        <Canvas camera={{ position: DEFAULT_CAMERA_POSITION, fov: 45 }}>
+        <Canvas camera={{ position: DEFAULT_CAMERA_POSITION, fov: 45 }} gl={{ alpha: true }} style={{ background: 'transparent' }}>
           <MapScene 
             themeColors={resolvedTheme} 
             groundEqSettings={groundEqSettings} 

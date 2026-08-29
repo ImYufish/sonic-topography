@@ -13,7 +13,6 @@ export const i18nDict: Record<string, { zh: string; en: string }> = {
   'nav.netease': { zh: '网易云', en: 'NETEASE' },
   'nav.qqmusic': { zh: 'QQ音乐', en: 'QQ MUSIC' },
   'nav.playlist': { zh: '歌单', en: 'PLAYLIST' },
-  'nav.input': { zh: 'INPUT', en: 'INPUT' },
   'nav.example': { zh: '示例', en: 'EXAMPLE' },
   'nav.upload': { zh: '上传', en: 'UPLOAD' },
   'nav.perspective': { zh: '视角', en: 'VIEW' },

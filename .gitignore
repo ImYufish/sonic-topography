@@ -1,3 +1,4 @@
+
 node_modules/
 build/*
 !build/
@@ -27,3 +28,4 @@ sonic-topography-douyin-cover*.png
 *.exe~
 .env*
 !.env.example
+edgeone/.edgeone_app_id
