@@ -486,6 +486,10 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
   // 始终保存最新的 currentSongId，供下方「打开菜单时滚动到当前歌曲」读取；
   // 不把它放进滚动 effect 的依赖，避免切歌时也触发滚动。
   const currentSongIdRef = useRef<number | string | null>(null);
+  // 始终保存最新的「当前歌曲 + 元数据 + 队列」，供页面隐藏/刷新时持久化播放进度（刷新后从进度续播，而非回到预设歌）。
+  const playStateRef = useRef<{ song: NeteaseSong | null; trackName: string; cover: string; queue: NeteaseSong[] }>({
+    song: null, trackName: '', cover: '', queue: [],
+  });
   const hasBothCloudLogins = isNeteaseCookieValid && isQQCookieValid;
   const effectiveSearchProvider: SearchProvider = searchProvider;
   const activeCloudLabel = cloudProvider === 'qq' ? t('ui.text.1', lang) : t('ui.text.2', lang);
@@ -662,6 +666,31 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     return () => window.clearInterval(intervalId);
   }, []);
 
+  // 刷新 / 切后台 / 关闭页面时，把当前播放进度写入 lastPlayedStorage，下次启动可续播（而非回到预设歌）。
+  useEffect(() => {
+    const persist = () => {
+      const s = playStateRef.current;
+      if (!s.song) return;
+      writeLastPlayedStorage({
+        type: 'cloud',
+        song: s.song,
+        trackName: s.trackName,
+        cover: s.cover,
+        queue: s.queue,
+        position: engine.audioElement?.currentTime || 0,
+      });
+    };
+    const onVis = () => { if (document.visibilityState === 'hidden') persist(); };
+    window.addEventListener('pagehide', persist);
+    window.addEventListener('beforeunload', persist);
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      window.removeEventListener('pagehide', persist);
+      window.removeEventListener('beforeunload', persist);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, []);
+
   useEffect(() => {
     const syncFullscreenState = () => {
       setIsFullscreen(Boolean(document.fullscreenElement));
@@ -808,7 +837,7 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     }
   };
 
-  const loadNeteaseSong = async (song: NeteaseSong, queue?: NeteaseSong[]) => {
+  const loadNeteaseSong = async (song: NeteaseSong, queue?: NeteaseSong[], startAt = 0) => {
     if (queue) setPlayQueue(queue);
     setCurrentSongId(songIdentity(song));
     setCurrentSong(song);
@@ -829,8 +858,8 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
       }
     }
 
-    // persist last played
-    writeLastPlayedStorage({ type: 'cloud', song, trackName: `${song.artist ? `${song.artist} - ` : ''}${song.name}`, cover: song.cover || '', queue: queue || playQueue });
+    // persist last played（含进度；进度会在暂停 / 页面隐藏时由下方监听器用真实 currentTime 覆盖）
+    writeLastPlayedStorage({ type: 'cloud', song, trackName: `${song.artist ? `${song.artist} - ` : ''}${song.name}`, cover: song.cover || '', queue: queue || playQueue, position: engine.audioElement?.currentTime || 0 });
 
     // 网页版线上音源统一走 Meting（QQ 音乐 / tencent），不再有网易云 / QQ 直接反代分支。
     const server = (song.metingServer as MetingServer) || getMetingServer();
@@ -847,6 +876,19 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
       setLyricsText(lyric.lyric || lyric.translatedLyric || song.lyric || '');
       engine.init();
       engine.loadUrl(playUrl);
+      // 续播：跳到指定进度再播（audio 元数据就绪后才能 seek，监听 canplay/loadedmetadata 一次性设置）。
+      if (startAt > 0) {
+        const audio = engine.audioElement;
+        if (audio) {
+          const seekToStart = () => {
+            try { audio.currentTime = startAt; } catch { /* 暂不可 seek，忽略 */ }
+            audio.removeEventListener('loadedmetadata', seekToStart);
+            audio.removeEventListener('canplay', seekToStart);
+          };
+          audio.addEventListener('loadedmetadata', seekToStart);
+          audio.addEventListener('canplay', seekToStart);
+        }
+      }
       engine.play();
       setSearchStatus('');
       setShowSearchPanel(false);
@@ -878,7 +920,8 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
     loadNeteaseSong(queue[nextIndex], queue);
   };
 
-  // 网页版启动时自动加载默认 Meting 歌单（QQ 音乐）并播放第一首。
+  // 网页版启动：优先恢复「上次播放」（localStorage 中的 lastPlayedStorage，带进度）→ 从进度续播；
+  // 没有上次播放时才自动加载默认 Meting 歌单（QQ 音乐）并播放第一首。
   // 仅依赖自建 Meting 后端，不涉及账号 / 代理 / Cookie。
   // 启动配置来源（优先级）：网页内 localStorage 覆盖 → public/site-config.json5 部署默认 → 代码内置默认。
   // 站点配置在启动时 loadSiteConfig() 一次拉取，下面的读取均走 getSiteConfig()。
@@ -894,28 +937,39 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
         const server = getMetingServer();
         const siteIds = getSiteConfig()?.defaultPlaylistIds || [];
         const playlistIds = siteIds.length ? siteIds : DEFAULT_METING_PLAYLIST_IDS;
-        // 逐一加载所有默认歌单；第一个歌单的歌曲作为启动时的播放队列与面板内容。
-        for (let i = 0; i < playlistIds.length; i++) {
-          if (cancelled) return;
-          const playlistId = playlistIds[i];
-          const songs = await getMetingPlaylist(playlistId, server);
-          if (cancelled) return;
-          if (songs.length > 0) {
-            if (i === 0) {
-              setNeteaseCloudSongs(songs);
-              setNeteaseCloudStatus('');
+        // 逐一加载所有默认歌单，填充面板内容（无论是否续播都加载，便于浏览）。
+        let firstSongs: NeteaseSong[] = [];
+        try {
+          for (let i = 0; i < playlistIds.length; i++) {
+            if (cancelled) return;
+            const playlistId = playlistIds[i];
+            const songs = await getMetingPlaylist(playlistId, server);
+            if (cancelled) return;
+            if (songs.length > 0) {
+              if (i === 0) {
+                setNeteaseCloudSongs(songs);
+                setNeteaseCloudStatus('');
+                firstSongs = songs;
+              }
+              // 把每份默认歌单都落到本地「歌单」列表（SavedPlaylist），按 id 去重，仅首次补入。
+              const savedId = `meting-${playlistId}`;
+              setPlaylists((current) => {
+                if (current.some((p) => p.id === savedId)) return current;
+                return [...current, { id: savedId, name: `Meting 歌单 ${playlistId}`, songs }];
+              });
+            } else {
+              console.warn('默认歌单未返回歌曲:', playlistId);
             }
-            // 把每份默认歌单都落到本地「歌单」列表（SavedPlaylist），按 id 去重，仅首次补入。
-            const savedId = `meting-${playlistId}`;
-            setPlaylists((current) => {
-              if (current.some((p) => p.id === savedId)) return current;
-              return [...current, { id: savedId, name: `Meting 歌单 ${playlistId}`, songs }];
-            });
-            // 仅第一个歌单自动播放第一首（Meting provider 走 loadNeteaseSong 的 meting 分支）。
-            if (i === 0) loadNeteaseSong(songs[0], songs);
-          } else {
-            console.warn('默认歌单未返回歌曲:', playlistId);
           }
+        } catch (e) {
+          console.warn('默认歌单加载失败（不影响续播上次播放）:', e);
+        }
+        // 启动播放：优先恢复上次播放（带进度续播），否则播放预设第一首。
+        const last = readLastPlayedStorage();
+        if (last?.type === 'cloud' && last.song && (last.position ?? 0) > 0) {
+          loadNeteaseSong(last.song, last.queue, last.position);
+        } else if (firstSongs.length) {
+          loadNeteaseSong(firstSongs[0], firstSongs);
         }
       } catch (error) {
         if (cancelled) return;
@@ -947,6 +1001,19 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
   useEffect(() => {
     currentSongIdRef.current = currentSongId;
   }, [currentSongId]);
+
+  // 打开歌单面板时，自动把面板切到「包含当前播放歌曲」的那个歌单。
+  // 否则面板停在默认/上次选中的歌单，里面没有当前歌，下方滚动自然找不到元素、毫无反应；
+  // 切到正确歌单后，下方滚动 effect 会因 activePlaylistId 变化而重跑并对焦。
+  useEffect(() => {
+    if (!showPlaylistPanel) return;
+    const id = String(currentSongIdRef.current);
+    if (!id || id === 'null') return;
+    const target = playlists.find((p) => (p.songs ?? []).some((s) => songIdentity(s) === id));
+    if (target && target.id !== activePlaylistId) {
+      setActivePlaylistId(target.id);
+    }
+  }, [showPlaylistPanel]);
 
   // 仅在「打开歌单面板 / 切换歌单 / 切换右侧列表视图」时，把当前正在播放的歌滚动到可视区域中央；
   // 切歌（currentSongId 变化）不再触发，避免浏览列表时被反复跳动打断。
@@ -1075,6 +1142,14 @@ export function UI({ theme, resolvedTheme, customThemes, activeCustomThemeId, th
   };
 
   const activePlaylist = playlists.find((playlist) => playlist.id === activePlaylistId) || playlists[0];
+
+  // 每帧把最新播放状态同步进 playStateRef，供下方 pagehide/visibilitychange 监听器在刷新/切后台时持久化进度（无需依赖数组，避免闭包拿到旧值）。
+  playStateRef.current = {
+    song: currentSong,
+    trackName,
+    cover: currentCover,
+    queue: playQueue.length ? playQueue : (activePlaylist?.songs || []),
+  };
 
   const latestRefs = useRef({ displaySettings, playFromQueue });
   useEffect(() => {
